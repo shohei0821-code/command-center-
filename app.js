@@ -4,9 +4,12 @@
   const $$ = (s, r = document) => [...r.querySelectorAll(s)];
   const KEY = 'command-center-data-v2';
   const CLOUD_KEY = 'command-center-cloud-v1';
+  const GOOGLE_AUTO_KEY = 'command-center-google-auto-v1';
+  const GOOGLE_LIST_KEY = 'command-center-google-list-v1';
   const readCloudConfig = () => { try { return JSON.parse(localStorage.getItem(CLOUD_KEY) || 'null'); } catch (_) { return null; } };
   let cloudConfig = readCloudConfig();
   let cloudRevision = null, cloudAuto = false, cloudBlocked = false, cloudTimer = null, cloudPullBusy = false, cloudPushBusy = false, suppressCloud = false;
+  let googleAuto = localStorage.getItem(GOOGLE_AUTO_KEY) === 'true', googleListId = localStorage.getItem(GOOGLE_LIST_KEY) || '', googleSyncBusy = false, googleSyncTimer = null, suppressGoogleSync = false;
   const legacyKey = 'command-center-prototype-v1';
   const today = new Date();
   const dateKey = d => [d.getFullYear(), String(d.getMonth() + 1).padStart(2, '0'), String(d.getDate()).padStart(2, '0')].join('-');
@@ -107,7 +110,7 @@
   $('#itemForm').addEventListener('submit', e => {
     e.preventDefault(); const title = $('#itemName').value.trim(); if (!title) return;
     if (modalType === 'task') {
-      const item = { id: editingId || (crypto.randomUUID ? crypto.randomUUID() : String(Date.now())), title, dueDate: $('#itemDate').value, category: $('#itemGroup').value, priority: $('#itemPriority').value, done: editingId ? !!state.tasks.find(t => t.id === editingId)?.done : false };
+      const item = { id: editingId || (crypto.randomUUID ? crypto.randomUUID() : String(Date.now())), title, dueDate: $('#itemDate').value, category: $('#itemGroup').value, priority: $('#itemPriority').value, done: editingId ? !!state.tasks.find(t => t.id === editingId)?.done : false, sample:false, updatedAt:new Date().toISOString() };
       if (editingId) state.tasks = state.tasks.map(t => t.id === editingId ? {...t, ...item} : t); else state.tasks.unshift(item);
     } else {
       const item = { id: editingId || (crypto.randomUUID ? crypto.randomUUID() : String(Date.now())), title, date: $('#itemDate').value, start: $('#itemTime').value, end: '', location: $('#itemGroup').value };
@@ -118,7 +121,7 @@
   document.addEventListener('change', e => {
     if (!e.target.matches('.check')) return;
     const row = e.target.closest('[data-task-id]'); const task = state.tasks.find(t => t.id === row?.dataset.taskId); if (!task) return;
-    task.done = e.target.checked; render(); if (filter !== 'all') $$('[data-filter="' + filter + '"]')[0]?.click();
+    task.done = e.target.checked; task.updatedAt = new Date().toISOString(); render(); if (filter !== 'all') $$('[data-filter="' + filter + '"]')[0]?.click();
   });
   document.addEventListener('click', e => {
     const row = e.target.closest('[data-task-id]');
@@ -208,7 +211,7 @@
       const item = matches[0];
       if (deleting) { pendingVoiceDelete = {kind:wantsTask ? 'task':'event',id:item.id,title:item.title}; voiceSay(`${item.title}を削除しますか。実行するなら、はいと言ってください`); return; }
       if (!wantsTask) { voiceSay('予定の完了操作には対応していません'); return; }
-      item.done = true; render(); voiceSay(`${item.title}を完了にしました`); return;
+      item.done = true; item.updatedAt = new Date().toISOString(); render(); voiceSay(`${item.title}を完了にしました`); return;
     }
     if ((wantsTask || wantsEvent) && /追加|登録|作成/.test(command)) {
       const title = voiceTitle(command);
@@ -219,7 +222,7 @@
         state.events.unshift({id,title,date,start,end,location:'',sample:false});
         render(); voiceSay(`${date} ${start}に、${title}を予定へ追加しました`); return;
       }
-      state.tasks.unshift({id,title,dueDate:date,category:'個人',priority:'medium',done:false,sample:false});
+      state.tasks.unshift({id,title,dueDate:date,category:'個人',priority:'medium',done:false,sample:false,updatedAt:new Date().toISOString()});
       render(); voiceSay(`${date}までのタスク、${title}を追加しました`); return;
     }
     if (/タスク|todo/.test(command) && /一覧|何が|教えて/.test(command)) {
@@ -294,6 +297,50 @@
     root.innerHTML = googleTaskItems.map(task => '<div class="integration-box" data-google-task="' + escapeHtml(task.id) + '"><label style="display:flex;gap:9px;align-items:center;flex:1"><input type="checkbox" class="google-task-done" ' + (task.status === 'completed' ? 'checked' : '') + '><span>' + escapeHtml(task.title) + '</span></label><span class="task-time">' + escapeHtml(task.due ? task.due.slice(0,10) : '') + '</span><button class="link-button google-task-edit" type="button">編集</button><button class="link-button google-task-delete" type="button">削除</button></div>').join('') || '<p class="demo-note">このリストにタスクはありません。</p>';
   }
   async function googleRequest(path, options = {}) { return cloudRequest(path, cloudConfig, options); }
+  function showGoogleSyncControls() {
+    $('#startGoogleSync').hidden = googleAuto;
+    $('#stopGoogleSync').hidden = !googleAuto;
+    $('#googleTaskList').disabled = googleAuto;
+    $('#googleSyncStatus').textContent = googleAuto ? '双方向同期中 · 選択したGoogleリストとCommand Centerのタスクを1分ごとに確認します。' : '双方向同期は停止中です。';
+  }
+  function scheduleGoogleSync(delay = 500) {
+    if (!googleAuto || !cloudAuto || suppressGoogleSync) return;
+    clearTimeout(googleSyncTimer); googleSyncTimer = setTimeout(() => runGoogleSync(false), delay);
+  }
+  async function runGoogleSync(showResult = true) {
+    if (!googleAuto || !googleListId || googleSyncBusy || !cloudAuto || cloudBlocked || document.visibilityState !== 'visible') return;
+    googleSyncBusy = true;
+    try {
+      if (cloudConfig?.dirty) await pushCloud();
+      if (!cloudAuto || cloudBlocked || cloudConfig?.dirty) throw new Error('クラウド同期が落ち着いてから再試行します');
+      let remote = await cloudRequest('/v1/state');
+      if (Number.isInteger(cloudRevision) && remote.revision > cloudRevision) {
+        suppressCloud = true; suppressGoogleSync = true; state = {...remote.data,theme:remote.data.theme==='light'?'light':'dark'}; render(); suppressCloud = false; suppressGoogleSync = false;
+      }
+      const sentTasks = JSON.stringify(state.tasks);
+      const payload = await googleRequest('/v1/google/sync',{method:'POST',body:JSON.stringify({listId:googleListId,expectedRevision:remote.revision,tasks:JSON.parse(sentTasks)})});
+      cloudRevision = payload.revision; cloudConfig = {...cloudConfig,revision:payload.revision,dirty:false}; localStorage.setItem(CLOUD_KEY,JSON.stringify(cloudConfig));
+      if (sentTasks === JSON.stringify(state.tasks)) {
+        suppressCloud = true; suppressGoogleSync = true; state.tasks = payload.data.tasks; render(); suppressCloud = false; suppressGoogleSync = false;
+      } else scheduleGoogleSync(100);
+      $('#googleSyncStatus').textContent = '双方向同期済み · ' + payload.syncedTasks + '件を確認しました。';
+      if (showResult) toast('Google Tasksと双方向同期しました');
+    } catch (error) {
+      suppressCloud = false; suppressGoogleSync = false;
+      $('#googleSyncStatus').textContent = error.status === 409 ? 'クラウド側の変更と重なりました。同期を再試行します。' : error.message;
+      if (error.status === 409) scheduleGoogleSync(3000);
+    } finally { googleSyncBusy = false; }
+  }
+  $('#startGoogleSync').addEventListener('click', async () => {
+    if (!cloudAuto || cloudBlocked) { $('#googleSyncStatus').textContent = '先に「設定」でクラウド同期を開始してください。'; return; }
+    const listId = $('#googleTaskList').value;
+    const listName = $('#googleTaskList').selectedOptions[0]?.textContent || '選択したリスト';
+    if (!listId) return;
+    if (!confirm('「' + listName + '」とCommand Centerのタスクを双方向同期します。Google側のタスクを取り込み、Command Centerのサンプル以外のタスクをGoogleへ追加します。今後の編集・完了・削除も両側へ反映します。開始しますか？')) return;
+    googleListId = listId; localStorage.setItem(GOOGLE_LIST_KEY,listId); googleAuto = true; localStorage.setItem(GOOGLE_AUTO_KEY,'true'); showGoogleSyncControls();
+    await runGoogleSync(true);
+  });
+  $('#stopGoogleSync').addEventListener('click', () => { googleAuto = false; localStorage.setItem(GOOGLE_AUTO_KEY,'false'); clearTimeout(googleSyncTimer); showGoogleSyncControls(); });
   async function loadGoogleTasks() {
     const listId = $('#googleTaskList').value;
     if (!listId) return;
@@ -308,7 +355,8 @@
     const result = await googleRequest('/v1/google/lists');
     const select = $('#googleTaskList'); const previous = select.value;
     select.innerHTML = result.items.map(item => '<option value="' + escapeHtml(item.id) + '">' + escapeHtml(item.title) + '</option>').join('');
-    if (result.items.some(item => item.id === previous)) select.value = previous;
+    const wanted = googleAuto ? googleListId : previous;
+    if (result.items.some(item => item.id === wanted)) select.value = wanted;
     $('#googleTaskControls').hidden = result.items.length === 0;
     if (result.items.length) await loadGoogleTasks();
     else $('#googleStatus').textContent = 'Googleのタスクリストが見つかりません。';
@@ -316,6 +364,7 @@
   async function refreshGoogleStatus() {
     if (!cloudConfig?.endpoint || !cloudConfig?.token) { $('#googleStatus').textContent = '先に「設定」でCloudflare同期先を登録してください。'; return; }
     try {
+      showGoogleSyncControls();
       const result = await googleRequest('/v1/google/status');
       $('#connectGoogle').hidden = result.connected;
       $('#disconnectGoogle').hidden = !result.connected;
@@ -333,22 +382,25 @@
   });
   $('#disconnectGoogle').addEventListener('click', async () => {
     if (!confirm('Google Tasksとの接続を解除しますか？Google側のタスクは削除されません。')) return;
-    try { await googleRequest('/v1/google/disconnect',{method:'POST'}); googleTaskItems = []; renderGoogleTasks(); await refreshGoogleStatus(); }
+    try { await googleRequest('/v1/google/disconnect',{method:'POST'}); googleAuto = false; localStorage.setItem(GOOGLE_AUTO_KEY,'false'); clearTimeout(googleSyncTimer); googleTaskItems = []; renderGoogleTasks(); showGoogleSyncControls(); await refreshGoogleStatus(); }
     catch (error) { $('#googleStatus').textContent = error.message; }
   });
   $('#refreshGoogleTasks').addEventListener('click', loadGoogleTasks);
-  $('#googleTaskList').addEventListener('change', loadGoogleTasks);
+  $('#googleTaskList').addEventListener('change', () => {
+    if (googleAuto && $('#googleTaskList').value !== googleListId) { $('#googleTaskList').value = googleListId; toast('同期先を変えるには、先に双方向同期を停止してください'); return; }
+    loadGoogleTasks();
+  });
   $('#googleTaskForm').addEventListener('submit', async event => {
     event.preventDefault(); const title = $('#googleTaskTitle').value.trim();
     if (!title || !$('#googleTaskList').value) return;
-    try { await googleRequest('/v1/google/tasks',{method:'POST',body:JSON.stringify({listId:$('#googleTaskList').value,title})}); $('#googleTaskTitle').value = ''; await loadGoogleTasks(); }
+    try { await googleRequest('/v1/google/tasks',{method:'POST',body:JSON.stringify({listId:$('#googleTaskList').value,title})}); $('#googleTaskTitle').value = ''; await loadGoogleTasks(); scheduleGoogleSync(300); }
     catch (error) { $('#googleStatus').textContent = error.message; }
   });
   $('#googleTasks').addEventListener('change', async event => {
     if (!event.target.matches('.google-task-done')) return;
     const row = event.target.closest('[data-google-task]'); const task = googleTaskItems.find(item => item.id === row?.dataset.googleTask);
     if (!task) return;
-    try { await googleRequest('/v1/google/tasks/' + encodeURIComponent($('#googleTaskList').value) + '/' + encodeURIComponent(task.id),{method:'PATCH',body:JSON.stringify({status:event.target.checked?'completed':'needsAction'})}); await loadGoogleTasks(); }
+    try { await googleRequest('/v1/google/tasks/' + encodeURIComponent($('#googleTaskList').value) + '/' + encodeURIComponent(task.id),{method:'PATCH',body:JSON.stringify({status:event.target.checked?'completed':'needsAction'})}); await loadGoogleTasks(); scheduleGoogleSync(300); }
     catch (error) { event.target.checked = !event.target.checked; $('#googleStatus').textContent = error.message; }
   });
   $('#googleTasks').addEventListener('click', async event => {
@@ -364,7 +416,7 @@
         if (title === null || !title.trim()) return;
         await googleRequest(path,{method:'PATCH',body:JSON.stringify({title:title.trim()})});
       } else return;
-      await loadGoogleTasks();
+      await loadGoogleTasks(); scheduleGoogleSync(300);
     } catch (error) { $('#googleStatus').textContent = error.message; }
   });
   function keepCloudConfig(config) {
@@ -422,6 +474,7 @@
       cloudConfig = {...cloudConfig, revision:saved.revision, dirty:changedDuringUpload}; localStorage.setItem(CLOUD_KEY, JSON.stringify(cloudConfig));
       showSyncStatus(changedDuringUpload ? '変更を続けて同期しています…' : '同期済み · クラウド版 ' + saved.revision);
       if (changedDuringUpload) { clearTimeout(cloudTimer); cloudTimer = setTimeout(pushCloud, 100); }
+      else scheduleGoogleSync(250);
     } catch (error) {
       if (error.status === 409) {
         cloudBlocked = true; cloudAuto = false; cloudConfig = {...cloudConfig, enabled:false}; localStorage.setItem(CLOUD_KEY, JSON.stringify(cloudConfig));
@@ -438,6 +491,7 @@
         suppressCloud = true; state = {...remote.data, theme:remote.data.theme === 'light' ? 'light' : 'dark'}; cloudRevision = remote.revision;
         cloudConfig = {...cloudConfig, revision:remote.revision}; localStorage.setItem(CLOUD_KEY, JSON.stringify(cloudConfig)); render(); suppressCloud = false;
         showSyncStatus('別の端末または会話からの変更を反映しました（版 ' + remote.revision + '）。');
+        scheduleGoogleSync(250);
       }
     } catch (_) { showSyncStatus('同期サーバーに接続できません。再接続を試しています…'); }
     finally { suppressCloud = false; cloudPullBusy = false; }
@@ -445,11 +499,12 @@
   $('#testSync').addEventListener('click', syncTest);
   $('#uploadSync').addEventListener('click', syncUpload);
   $('#downloadSync').addEventListener('click', syncDownload);
+  setInterval(() => { if (googleAuto) { runGoogleSync(false); loadGoogleTasks(); } }, 60000);
   window.addEventListener('online', () => { if (cloudAuto && cloudConfig?.dirty) { clearTimeout(cloudTimer); cloudTimer = setTimeout(pushCloud, 100); } });
   if (cloudConfig?.endpoint) { $('#syncEndpoint').value = cloudConfig.endpoint; $('#syncToken').value = cloudConfig.token || ''; }
   const googleResult = new URLSearchParams(location.search).get('google');
   if (googleResult) {
-    const messages = {connected:'Google Tasksに接続しました。',cancelled:'Google接続をキャンセルしました。', 'state-error':'Google認証の確認に失敗しました。もう一度接続してください。','server-config-error':'Google連携のサーバー設定を確認してください。','token-error':'Google認証を完了できませんでした。もう一度接続してください。','offline-access-error':'Googleから継続接続の許可を受け取れませんでした。再接続してください。','server-error':'Google連携でエラーが発生しました。'};
+    const messages = {connected:'Google Tasksに接続しました。',cancelled:'Google接続をキャンセルしました。', 'state-error':'Google認証の確認に失敗しました。もう一度接続してください。','server-config-error':'Google連携のサーバー設定を確認してください。','token-error':'Google認証を完了できませんでした。もう一度接続してください。','scope-error':'Google Tasksへのアクセス許可が確認できません。接続をやり直してください。','offline-access-error':'Googleから継続接続の許可を受け取れませんでした。再接続してください。','server-error':'Google連携でエラーが発生しました。'};
     toast(messages[googleResult] || 'Google連携の結果を確認してください。');
     history.replaceState(null,'',location.pathname + location.hash);
   }

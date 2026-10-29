@@ -30,6 +30,13 @@ async function ensureGoogleSchema(db) {
     state_hash TEXT PRIMARY KEY,
     expires_at INTEGER NOT NULL
   )`).run();
+  await db.prepare(`CREATE TABLE IF NOT EXISTS google_task_links (
+    local_id TEXT PRIMARY KEY,
+    list_id TEXT NOT NULL,
+    google_id TEXT NOT NULL,
+    baseline TEXT NOT NULL,
+    UNIQUE(list_id, google_id)
+  )`).run();
 }
 
 function hexBytes(hex) {
@@ -55,7 +62,9 @@ async function decryptCredentials(env, row) {
   return JSON.parse(new TextDecoder().decode(plain));
 }
 
+let googleCachedAccessToken = '', googleAccessTokenExpiresAt = 0;
 async function googleAccessToken(db, env) {
+  if (googleCachedAccessToken && Date.now() < googleAccessTokenExpiresAt - 60_000) return googleCachedAccessToken;
   const row = await db.prepare("SELECT ciphertext, iv FROM google_oauth WHERE id = 'google'").first();
   if (!row) throw Object.assign(new Error('Google Tasks is not connected'), {status:409});
   const credentials = await decryptCredentials(env, row);
@@ -65,7 +74,8 @@ async function googleAccessToken(db, env) {
   });
   const token = await response.json().catch(() => ({}));
   if (!response.ok || !token.access_token) throw Object.assign(new Error('Google token refresh failed. Reconnect Google Tasks.'), {status:502});
-  return token.access_token;
+  googleCachedAccessToken = token.access_token; googleAccessTokenExpiresAt = Date.now() + (Number(token.expires_in) || 3600) * 1000;
+  return googleCachedAccessToken;
 }
 
 async function googleApi(db, env, path, options = {}) {
@@ -76,6 +86,93 @@ async function googleApi(db, env, path, options = {}) {
   const payload = await response.json().catch(() => ({}));
   if (!response.ok) throw Object.assign(new Error(payload.error?.message || 'Google Tasks request failed'), {status:response.status});
   return payload;
+}
+
+async function listGoogleTasks(db, env, listId) {
+  const items = []; let pageToken = '';
+  for (let page = 0; page < 50; page++) {
+    const query = new URLSearchParams({maxResults:'100',showCompleted:'true',showHidden:'true'});
+    if (pageToken) query.set('pageToken',pageToken);
+    const result = await googleApi(db,env,'/lists/' + encodeURIComponent(listId) + '/tasks?' + query);
+    items.push(...(result.items || []));
+    if (items.length > 5000) throw Object.assign(new Error('Google list exceeds the 5,000 task sync limit'), {status:413});
+    pageToken = result.nextPageToken || '';
+    if (!pageToken) return items;
+  }
+  throw Object.assign(new Error('Google list has too many pages to sync safely'), {status:413});
+}
+
+async function writeGoogleTask(db, env, listId, task, googleTaskId = '') {
+  const body = {title:task.title, status:task.done ? 'completed' : 'needsAction', ...(task.dueDate ? {due:task.dueDate+'T00:00:00.000Z'} : {due:null})};
+  const path = '/lists/' + encodeURIComponent(listId) + '/tasks' + (googleTaskId ? '/' + encodeURIComponent(googleTaskId) : '');
+  return googleApi(db,env,path,{method:googleTaskId?'PATCH':'POST',body:JSON.stringify(body)});
+}
+
+async function upsertGoogleTaskLink(db, localId, listId, googleId, baseline) {
+  await db.prepare(`INSERT INTO google_task_links (local_id, list_id, google_id, baseline) VALUES (?, ?, ?, ?)
+    ON CONFLICT(local_id) DO UPDATE SET list_id=excluded.list_id, google_id=excluded.google_id, baseline=excluded.baseline`)
+    .bind(localId,listId,googleId,JSON.stringify(baseline)).run();
+}
+
+async function syncGoogleTaskList(db, env, listId, suppliedTasks) {
+  const remoteItems = await listGoogleTasks(db,env,listId);
+  const localTasks = suppliedTasks.map(task => ({...normalizeTask(task,{id:cleanText(task?.id,100)}),sample:task?.sample === true}));
+  const localById = new Map(localTasks.map(task=>[task.id,task]));
+  const remoteById = new Map(remoteItems.map(task=>[task.id,task]));
+  const links = await db.prepare('SELECT local_id, google_id, baseline FROM google_task_links WHERE list_id = ?').bind(listId).all();
+  const linkByLocal = new Map((links.results || []).map(link=>[link.local_id,link]));
+  const allLinked = new Set(((await db.prepare('SELECT local_id FROM google_task_links').all()).results || []).map(link=>link.local_id));
+  const resultByLocal = new Map(localTasks.map(task=>[task.id,task]));
+  const matchedRemote = new Set();
+
+  for (const link of linkByLocal.values()) {
+    const local = localById.get(link.local_id); const remote = remoteById.get(link.google_id);
+    let baseline = {};
+    try { baseline = JSON.parse(link.baseline); } catch (_) {}
+    if (!local) {
+      if (remote) await googleApi(db,env,'/lists/'+encodeURIComponent(listId)+'/tasks/'+encodeURIComponent(remote.id),{method:'DELETE'});
+      await db.prepare('DELETE FROM google_task_links WHERE local_id = ?').bind(link.local_id).run();
+      matchedRemote.add(link.google_id); continue;
+    }
+    if (!remote) {
+      if (!sameTaskProjection(taskProjection(local),baseline)) {
+        const recreated = await writeGoogleTask(db,env,listId,local);
+        await upsertGoogleTaskLink(db,local.id,listId,recreated.id,taskProjection(local));
+      } else {
+        resultByLocal.delete(local.id);
+        await db.prepare('DELETE FROM google_task_links WHERE local_id = ?').bind(local.id).run();
+      }
+      continue;
+    }
+    matchedRemote.add(remote.id);
+    const localProjection = taskProjection(local), remoteProjection = googleTaskProjection(remote);
+    const localChanged = !sameTaskProjection(localProjection,baseline);
+    const remoteChanged = !sameTaskProjection(remoteProjection,baseline);
+    let finalProjection = remoteProjection;
+    if (localChanged && (!remoteChanged || Date.parse(local.updatedAt || 0) >= Date.parse(remote.updated || 0))) {
+      const saved = await writeGoogleTask(db,env,listId,local,remote.id);
+      finalProjection = taskProjection(local);
+      remote.updated = saved.updated || new Date().toISOString();
+    } else if (remoteChanged) {
+      resultByLocal.set(local.id,{...local,...remoteProjection,updatedAt:remote.updated || new Date().toISOString(),sample:false});
+    }
+    await upsertGoogleTaskLink(db,local.id,listId,remote.id,finalProjection);
+  }
+
+  for (const remote of remoteItems) {
+    if (matchedRemote.has(remote.id)) continue;
+    const id = crypto.randomUUID(); const projected = googleTaskProjection(remote);
+    resultByLocal.set(id,{id,...projected,category:'Google Tasks',priority:'medium',sample:false,updatedAt:remote.updated || new Date().toISOString()});
+    await upsertGoogleTaskLink(db,id,listId,remote.id,projected);
+  }
+
+  for (const local of localTasks) {
+    if (allLinked.has(local.id) || local.sample) continue;
+    const created = await writeGoogleTask(db,env,listId,local);
+    await upsertGoogleTaskLink(db,local.id,listId,created.id,taskProjection(local));
+    allLinked.add(local.id);
+  }
+  return [...resultByLocal.values()];
 }
 
 function cleanText(value, max = 200) {
@@ -95,10 +192,20 @@ function normalizeTask(input, current = {}) {
     priority,
     dueDate: /^\d{4}-\d{2}-\d{2}$/.test(dueDate) ? dueDate : '',
     done: typeof input.done === 'boolean' ? input.done : !!current.done,
-    sample: false,
-    updatedAt: new Date().toISOString()
+    sample: input.sample === true,
+    updatedAt: cleanText(input.updatedAt, 40) || new Date().toISOString()
   };
 }
+
+function taskProjection(task) {
+  return {title:cleanText(task.title,200),dueDate:/^\d{4}-\d{2}-\d{2}$/.test(task.dueDate || '') ? task.dueDate : '',done:!!task.done};
+}
+
+function googleTaskProjection(task) {
+  return {title:cleanText(task.title,200),dueDate:/^\d{4}-\d{2}-\d{2}$/.test((task.due || '').slice(0,10)) ? task.due.slice(0,10) : '',done:task.status === 'completed'};
+}
+
+function sameTaskProjection(a,b) { return JSON.stringify(a) === JSON.stringify(b); }
 
 function normalizeEvent(input, current = {}) {
   const title = cleanText(input.title ?? current.title);
@@ -265,6 +372,7 @@ export default {
         });
         const token = await tokenResponse.json().catch(() => ({}));
         if (!tokenResponse.ok || !token.access_token) return Response.redirect(APP_URL + '?google=token-error', 302);
+        if (!String(token.scope || '').split(/\s+/).includes(GOOGLE_SCOPE)) return Response.redirect(APP_URL + '?google=scope-error', 302);
         const previous = await env.DB.prepare("SELECT ciphertext, iv FROM google_oauth WHERE id = 'google'").first();
         const existing = previous ? await decryptCredentials(env, previous) : {};
         const credentials = {refresh_token:token.refresh_token || existing.refresh_token, scope:token.scope || GOOGLE_SCOPE, connected_at:new Date().toISOString()};
@@ -335,8 +443,20 @@ export default {
           const row = await env.DB.prepare("SELECT updated_at FROM google_oauth WHERE id = 'google'").first();
           return json(request,{connected:!!row, connectedAt:row?.updated_at || null});
         }
+        if (parts.length === 3 && parts[2] === 'sync' && request.method === 'POST') {
+          const body = await bodyJson(request);
+          const listId = cleanText(body.listId,300);
+          if (!listId || !Array.isArray(body.tasks) || body.tasks.length > 5000 || !Number.isInteger(body.expectedRevision)) return json(request,{error:'listId, expectedRevision and up to 5,000 tasks are required'},400);
+          const current = await getSnapshot(env.DB);
+          if (current.revision !== body.expectedRevision) return json(request,{error:'Revision conflict',...current},409);
+          const tasks = await syncGoogleTaskList(env.DB,env,listId,body.tasks);
+          const data = {...current.data,tasks};
+          if (!await replaceSnapshot(env.DB,current.revision,data)) return json(request,{error:'Revision conflict',...(await getSnapshot(env.DB))},409);
+          return json(request,{...(await getSnapshot(env.DB)),syncedTasks:tasks.length});
+        }
         if (parts.length === 3 && parts[2] === 'disconnect' && request.method === 'POST') {
           await env.DB.prepare("DELETE FROM google_oauth WHERE id = 'google'").run();
+          googleCachedAccessToken = ''; googleAccessTokenExpiresAt = 0;
           return json(request,{connected:false});
         }
         if (parts.length === 3 && parts[2] === 'lists' && request.method === 'GET') {
@@ -406,7 +526,7 @@ export default {
       return json(request, { error: 'Not found' }, 404);
     } catch (error) {
       const message = error?.message || 'Request failed';
-      return json(request, { error: message }, /required|must use|Invalid JSON|500 KB/.test(message) ? 400 : 500);
+      return json(request, { error: message }, error?.status || (/required|must use|Invalid JSON|500 KB/.test(message) ? 400 : 500));
     }
   }
 };
