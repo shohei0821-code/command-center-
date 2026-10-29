@@ -232,6 +232,8 @@
     voiceStatus.textContent = 'このブラウザーは音声認識に対応していません'; voiceButton.disabled = true;
   } else {
     voiceRecognition = new SpeechRecognition(); voiceRecognition.lang = 'ja-JP'; voiceRecognition.continuous = true; voiceRecognition.interimResults = false;
+    const hasOnDeviceRecognition = 'processLocally' in voiceRecognition;
+    if (hasOnDeviceRecognition) voiceRecognition.processLocally = true;
     voiceRecognition.onresult = event => {
       for (let i = event.resultIndex; i < event.results.length; i++) {
         if (!event.results[i].isFinal) continue;
@@ -252,7 +254,8 @@
     voiceButton.addEventListener('click', () => {
       voiceListening = !voiceListening; voiceButton.setAttribute('aria-pressed', String(voiceListening));
       voiceButton.setAttribute('aria-label', voiceListening ? 'チャッピーの音声操作を停止' : 'チャッピーの音声操作を開始');
-      if (voiceListening) { voiceStatus.textContent = '待機中。「チャッピー」と呼びかけてください'; try { voiceRecognition.start(); } catch (_) { voiceListening = false; voiceButton.setAttribute('aria-pressed','false'); voiceStatus.textContent = '音声認識を開始できません。ページを再読み込みしてからお試しください'; } }
+      if (voiceListening && !hasOnDeviceRecognition) { voiceListening = false; voiceButton.setAttribute('aria-pressed','false'); voiceStatus.textContent = '音声を外部へ送らない端末内認識がこのブラウザーで利用できません'; return; }
+      if (voiceListening) { voiceStatus.textContent = '待機中。「チャッピー」と呼びかけてください'; try { voiceRecognition.start(); } catch (_) { voiceListening = false; voiceButton.setAttribute('aria-pressed','false'); voiceStatus.textContent = '端末内の日本語音声認識を開始できません。ブラウザーの対応状況をご確認ください'; } }
       else { voiceRecognition.stop(); voiceStatus.textContent = '音声操作を停止しました'; }
     });
   }
