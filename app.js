@@ -6,6 +6,7 @@
   const legacyKey = 'command-center-prototype-v1';
   const today = new Date();
   const dateKey = d => [d.getFullYear(), String(d.getMonth() + 1).padStart(2, '0'), String(d.getDate()).padStart(2, '0')].join('-');
+  const old = (() => { try { return JSON.parse(localStorage.getItem(legacyKey) || '{}'); } catch (_) { return {}; } })();
   const seedTasks = [
     ['企画書の下書き','特撮部 / 企画','today','high'], ['撮影機材の確認','EVIL CHASER / 準備','today','high'],
     ['AEのチュートリアル視聴','スキルアップ','today','medium'], ['図書館で資料を借りる','大学','today','medium'],
@@ -16,7 +17,6 @@
     ['特撮部 企画会議','17:00','19:00','日藝（部室）'], ['ジム / トレーニング','21:00','21:45','自宅']
   ].map(([title, start, end, location], i) => ({ id: 'event-' + i, title, date: dateKey(today), start, end, location, sample: true }));
   const read = () => { try { return JSON.parse(localStorage.getItem(KEY) || 'null'); } catch (_) { return null; } };
-  const old = (() => { try { return JSON.parse(localStorage.getItem(legacyKey) || '{}'); } catch (_) { return {}; } })();
   let state = read() || {
     tasks: [...seedTasks, ...(Array.isArray(old.customTasks) ? old.customTasks.filter(x => x.type === 'task').map((x, i) => ({ id: 'legacy-' + i, title: x.name, category: x.group || '個人', priority: 'medium', dueDate: x.date || dateKey(today), done: !!x.done })) : [])],
     events: [...seedEvents, ...(Array.isArray(old.customTasks) ? old.customTasks.filter(x => x.type === 'event').map((x, i) => ({ id: 'legacy-event-' + i, title: x.name, date: x.date || dateKey(today), start: x.time || '09:00', end: '', location: x.group || '' })) : [])],
