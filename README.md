@@ -1,6 +1,6 @@
 # COMMAND CENTER
 
-予定とタスクをまとめる、GitHub Pages向けの静的PWAです。既存の暗色SF風デザインを保ちつつ、タスクと予定をブラウザ内に保存します。
+予定とタスクをまとめるGitHub Pages向けのPWAです。通常はタスクと予定をブラウザ内に保存し、任意でCloudflareの同期APIへ接続できます。
 
 ## できること
 
@@ -10,8 +10,10 @@
 - JSONによる全データのバックアップと復元
 - テーマ設定、タスク、予定のlocalStorage保存
 - PWAシェルのキャッシュとオフライン時の画面表示
+- Cloudflare Worker + D1による端末間同期
+- OAuthで保護したChatGPT MCPプラグインAPI（会話からタスク・予定の追加、編集、削除）
 
-保存データはブラウザ・端末ごとです。端末間同期や外部サービスとの自動同期はありません。サンプル予定は初回データとして追加されます。
+Cloudflare同期をセットアップすると、他端末やChatGPT MCPプラグインからタスク・予定を共有できます。Google Tasks・iCloud Calendarへの直接同期は未実装です。サンプル予定は初回データとして追加されます。
 
 ## 公開
 
@@ -19,4 +21,4 @@ GitHub Pagesの公開・確認手順は [DEPLOYMENT.md](./DEPLOYMENT.md) を参�
 
 ## セキュリティ
 
-このリポジトリは静的フロントエンドです。Google OAuthのクライアントシークレット、iCloudのアプリ用パスワード、ChatGPT/OpenAIのAPIキーをHTMLやJavaScriptへ記述しないでください。認証情報の保管・更新には別途バックエンドが必要です。
+Google OAuthのクライアントシークレット、iCloudのアプリ用パスワード、ChatGPT/OpenAIのAPIキーをHTMLやJavaScriptへ記述しないでください。API同期とChatGPT MCP接続の設定は [INTEGRATIONS.md](./INTEGRATIONS.md) を参照してください。

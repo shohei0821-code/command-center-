@@ -3,6 +3,10 @@
   const $ = (s, r = document) => r.querySelector(s);
   const $$ = (s, r = document) => [...r.querySelectorAll(s)];
   const KEY = 'command-center-data-v2';
+  const CLOUD_KEY = 'command-center-cloud-v1';
+  const readCloudConfig = () => { try { return JSON.parse(localStorage.getItem(CLOUD_KEY) || 'null'); } catch (_) { return null; } };
+  let cloudConfig = readCloudConfig();
+  let cloudRevision = null, cloudAuto = false, cloudBlocked = false, cloudTimer = null, cloudPullBusy = false, cloudPushBusy = false, suppressCloud = false;
   const legacyKey = 'command-center-prototype-v1';
   const today = new Date();
   const dateKey = d => [d.getFullYear(), String(d.getMonth() + 1).padStart(2, '0'), String(d.getDate()).padStart(2, '0')].join('-');
@@ -24,7 +28,14 @@
   };
   state.tasks = Array.isArray(state.tasks) ? state.tasks : [];
   state.events = Array.isArray(state.events) ? state.events : [];
-  const save = () => { try { localStorage.setItem(KEY, JSON.stringify(state)); } catch (_) { toast('保存できません。端末の空き容量を確認してください。'); } };
+  const save = () => {
+    try { localStorage.setItem(KEY, JSON.stringify(state)); }
+    catch (_) { toast('保存できません。端末の空き容量を確認してください。'); }
+    if (cloudAuto && !suppressCloud && !cloudBlocked) {
+      cloudConfig = {...cloudConfig, dirty:true}; localStorage.setItem(CLOUD_KEY, JSON.stringify(cloudConfig));
+      clearTimeout(cloudTimer); cloudTimer = setTimeout(pushCloud, 450);
+    }
+  };
   const notice = $('#notice'); let noticeTimer;
   function toast(message) { notice.textContent = message; notice.classList.add('show'); clearTimeout(noticeTimer); noticeTimer = setTimeout(() => notice.classList.remove('show'), 2600); }
   function applyTheme() {
@@ -142,7 +153,122 @@
   $('#notifBtn').addEventListener('click', () => toast('通知機能は未実装です。現在はこの端末にデータを保存しています。'));
   $$('[data-action="connection"]').forEach(b => b.addEventListener('click', () => go('connections')));
   $$('[data-action="notification"]').forEach(b => b.addEventListener('click', () => toast('通知は今後の拡張項目です。')));
+
+  const syncStatus = $('#syncStatus');
+  function showSyncStatus(message) { if (syncStatus) syncStatus.textContent = message; }
+  function configFromForm() {
+    const endpoint = $('#syncEndpoint').value.trim().replace(/\/+$/, '');
+    const token = $('#syncToken').value.trim();
+    if (!/^https:\/\//i.test(endpoint) && !/^http:\/\/localhost(?::\d+)?$/i.test(endpoint)) throw new Error('同期サーバーURLは https:// から入力してください');
+    if (token.length < 32) throw new Error('同期キーは32文字以上必要です');
+    const sameSavedAccount = cloudConfig?.endpoint === endpoint && cloudConfig?.token === token;
+    return {endpoint, token, enabled:!!(sameSavedAccount && cloudConfig.enabled), revision:sameSavedAccount ? cloudConfig.revision : null, dirty:sameSavedAccount && !!cloudConfig.dirty};
+  }
+  async function cloudRequest(path, config = cloudConfig, options = {}) {
+    if (!config?.endpoint || !config?.token) throw new Error('同期サーバーURLと同期キーを入力してください');
+    const response = await fetch(config.endpoint + path, { ...options, headers:{'Authorization':'Bearer ' + config.token, ...(options.body ? {'Content-Type':'application/json'} : {}), ...(options.headers || {})} });
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok) { const error = new Error(payload.error || '同期サーバーとの通信に失敗しました'); error.status = response.status; error.payload = payload; throw error; }
+    return payload;
+  }
+  function keepCloudConfig(config) {
+    cloudConfig = config; localStorage.setItem(CLOUD_KEY, JSON.stringify(config));
+    $('#syncEndpoint').value = config.endpoint || ''; $('#syncToken').value = config.token || '';
+  }
+  async function syncTest() {
+    try {
+      const config = configFromForm(); const wasEnabled = config.enabled; showSyncStatus('接続を確認しています…');
+      const remote = await cloudRequest('/v1/state', config);
+      if (wasEnabled && Number.isInteger(cloudConfig?.revision) && remote.revision !== cloudConfig.revision) {
+        clearTimeout(cloudTimer); cloudBlocked = true; cloudAuto = false;
+        keepCloudConfig({...config, enabled:false, revision:cloudConfig.revision, dirty:!!cloudConfig.dirty});
+        showSyncStatus('クラウド側に別の変更があります。上書きせず停止しました。「クラウドから受け取る」か「この端末から送る」を選んでください。'); return;
+      }
+      keepCloudConfig({...config, revision:remote.revision, dirty:wasEnabled && config.dirty});
+      cloudRevision = remote.revision; cloudBlocked = false;
+      showSyncStatus((wasEnabled ? '接続中です。' : '接続できました。初回同期の方法を選んでください。') + ' クラウドにタスク ' + remote.data.tasks.length + ' 件、予定 ' + remote.data.events.length + ' 件。');
+    } catch (error) { showSyncStatus(error.message); }
+  }
+  async function syncUpload() {
+    try {
+      const config = configFromForm();
+      const remote = await cloudRequest('/v1/state', config);
+      const summary = remote.data.tasks.length + '件のタスク、' + remote.data.events.length + '件の予定';
+      if (!confirm('この端末の内容でクラウドを上書きします。クラウド側の現在の内容は ' + summary + ' です。続けますか？')) return;
+      const saved = await cloudRequest('/v1/state', config, {method:'PUT', body:JSON.stringify({expectedRevision:remote.revision, data:state})});
+      cloudRevision = saved.revision; cloudBlocked = false; cloudAuto = true;
+      keepCloudConfig({...config, enabled:true, revision:saved.revision, dirty:false});
+      showSyncStatus('同期中 · この端末の内容をクラウドへ保存しました（版 ' + saved.revision + '）。'); toast('クラウド同期を開始しました');
+    } catch (error) { showSyncStatus(error.status === 409 ? '同期中に別の変更がありました。内容を確認してから再試行してください。' : error.message); }
+  }
+  async function syncDownload() {
+    try {
+      const config = configFromForm(); const remote = await cloudRequest('/v1/state', config);
+      if (!confirm('この端末のタスクと予定を、クラウド側の内容で置き換えます。続けますか？')) return;
+      clearTimeout(cloudTimer);
+      cloudAuto = false; suppressCloud = true;
+      state = {tasks:remote.data.tasks, events:remote.data.events, theme:remote.data.theme === 'light' ? 'light' : 'dark'};
+      cloudRevision = remote.revision; cloudBlocked = false;
+      keepCloudConfig({...config, enabled:true, revision:remote.revision, dirty:false}); render();
+      suppressCloud = false; cloudAuto = true;
+      showSyncStatus('同期中 · クラウドの内容を読み込みました（版 ' + remote.revision + '）。'); toast('クラウドの内容を読み込みました');
+    } catch (error) { suppressCloud = false; showSyncStatus(error.message); }
+  }
+  async function pushCloud() {
+    if (!cloudAuto || cloudBlocked || !cloudConfig?.dirty || cloudRevision === null) return;
+    if (cloudPushBusy) return;
+    cloudPushBusy = true;
+    const sentState = JSON.stringify(state);
+    try {
+      const saved = await cloudRequest('/v1/state', cloudConfig, {method:'PUT', body:JSON.stringify({expectedRevision:cloudRevision, data:JSON.parse(sentState)})});
+      cloudRevision = saved.revision;
+      const changedDuringUpload = JSON.stringify(state) !== sentState;
+      cloudConfig = {...cloudConfig, revision:saved.revision, dirty:changedDuringUpload}; localStorage.setItem(CLOUD_KEY, JSON.stringify(cloudConfig));
+      showSyncStatus(changedDuringUpload ? '変更を続けて同期しています…' : '同期済み · クラウド版 ' + saved.revision);
+      if (changedDuringUpload) { clearTimeout(cloudTimer); cloudTimer = setTimeout(pushCloud, 100); }
+    } catch (error) {
+      if (error.status === 409) {
+        cloudBlocked = true; cloudAuto = false; cloudConfig = {...cloudConfig, enabled:false}; localStorage.setItem(CLOUD_KEY, JSON.stringify(cloudConfig));
+        showSyncStatus('別の端末または会話から変更されています。上書き前に「クラウドから受け取る」で確認してください。');
+      } else showSyncStatus('接続できません。オンラインに戻ると再試行します。');
+    } finally { cloudPushBusy = false; }
+  }
+  async function pullCloudIfChanged() {
+    if (!cloudAuto || cloudBlocked || cloudPullBusy || cloudConfig?.dirty || document.visibilityState !== 'visible') return;
+    cloudPullBusy = true;
+    try {
+      const remote = await cloudRequest('/v1/state');
+      if (cloudRevision !== null && remote.revision > cloudRevision) {
+        suppressCloud = true; state = {...remote.data, theme:remote.data.theme === 'light' ? 'light' : 'dark'}; cloudRevision = remote.revision;
+        cloudConfig = {...cloudConfig, revision:remote.revision}; localStorage.setItem(CLOUD_KEY, JSON.stringify(cloudConfig)); render(); suppressCloud = false;
+        showSyncStatus('別の端末または会話からの変更を反映しました（版 ' + remote.revision + '）。');
+      }
+    } catch (_) { showSyncStatus('同期サーバーに接続できません。再接続を試しています…'); }
+    finally { suppressCloud = false; cloudPullBusy = false; }
+  }
+  $('#testSync').addEventListener('click', syncTest);
+  $('#uploadSync').addEventListener('click', syncUpload);
+  $('#downloadSync').addEventListener('click', syncDownload);
+  window.addEventListener('online', () => { if (cloudAuto && cloudConfig?.dirty) { clearTimeout(cloudTimer); cloudTimer = setTimeout(pushCloud, 100); } });
+  if (cloudConfig?.endpoint) { $('#syncEndpoint').value = cloudConfig.endpoint; $('#syncToken').value = cloudConfig.token || ''; }
+  async function initializeCloudSync() {
+    if (!cloudConfig?.enabled) return;
+    showSyncStatus('同期先を確認しています…');
+    if (cloudConfig.dirty && Number.isInteger(cloudConfig.revision)) {
+      cloudRevision = cloudConfig.revision; cloudAuto = true; showSyncStatus('前回の未送信変更を同期しています…'); pushCloud(); return;
+    }
+    try {
+      const remote = await cloudRequest('/v1/state');
+      if (Number.isInteger(cloudConfig.revision) && remote.revision > cloudConfig.revision) {
+        suppressCloud = true; state = {...remote.data, theme:remote.data.theme === 'light' ? 'light' : 'dark'}; render(); suppressCloud = false;
+      }
+      cloudRevision = remote.revision; cloudAuto = true; cloudConfig = {...cloudConfig, revision:remote.revision}; localStorage.setItem(CLOUD_KEY, JSON.stringify(cloudConfig));
+      showSyncStatus('同期中 · クラウド版 ' + remote.revision);
+    } catch (error) { showSyncStatus('同期を再開できません: ' + error.message); }
+  }
+  setInterval(pullCloudIfChanged, 20000);
   $('#todayHeading').textContent = today.getFullYear() + '年' + (today.getMonth()+1) + '月' + today.getDate() + '日（' + '日月火水木金土'[today.getDay()] + '）';
   render();
+  initializeCloudSync();
   if ('serviceWorker' in navigator && /^https?:$/.test(location.protocol)) navigator.serviceWorker.register('./sw.js').catch(() => {});
 })();

@@ -1,34 +1,53 @@
-# 外部連携の実現方法
+# 同期・会話操作のセットアップ
 
-現在のPWAは静的サイトです。ローカル保存、JSONバックアップ、ICS入出力を実装していますが、Google Tasks、iCloud、ChatGPTとのサーバー連携はまだ接続していません。
+Command Centerは通常、端末内にタスクと予定を保存します。`worker/` にはCloudflare Worker + D1の個人用同期APIと、OAuthで保護したChatGPT MCP接続口を用意しています。APIを一度公開すると、複数端末のPWAとChatGPTから同じタスク・予定を読み書きできます。Google TasksとiCloud Calendarへの直接同期は別機能で、このAPIはそれらへ自動転送しません。
 
-## Google Tasks
+## CloudflareへAPIを公開する
 
-Google Tasks APIはOAuth 2.0を使い、読み取り専用の `tasks.readonly` または追加・更新ができる `tasks` スコープを選びます。アプリの公開利用では同意画面やスコープ審査が必要になる場合があります。[Google Tasksの認証スコープ](https://developers.google.com/workspace/tasks/auth)
+この手順はCloudflareアカウントが必要です。現行のFree枠は小規模な個人利用の試作に足ります。公表上の上限はWorkersが1日10万リクエスト、D1が1日500万行読み取り・10万行書き込み・合計5GBです。D1の日次上限を超えると、その日の残りはクエリが失敗するため、利用量はCloudflareダッシュボードで確認してください ([Workers limits](https://developers.cloudflare.com/workers/platform/limits/), [D1 pricing](https://developers.cloudflare.com/d1/platform/pricing/))。
 
-### 無料枠で始める構成案
+1. Node.jsを用意し、ターミナルで `npx wrangler login` を実行してCloudflareへログインします。
+2. `npx wrangler d1 create command-center` を実行します。表示されたデータベースIDを `worker/wrangler.toml` の `database_id` に入れます。
+3. リポジトリのルートから `npx wrangler d1 execute command-center --remote --file=worker/schema.sql --config worker/wrangler.toml` を実行し、保存領域を作ります。
+4. 同期キーを用意します。Macなら `openssl rand -hex 32` でランダムな値を作れます。これを公開HTMLやGitHubへ貼らないでください。
+5. `npx wrangler secret put API_TOKEN --config worker/wrangler.toml` を実行し、同期キーを入力してWorkerの秘密情報として保存します。これはPWAの端末同期に使います。
+6. まず `npx wrangler deploy --config worker/wrangler.toml` を実行します。表示された `https://...workers.dev` のURLがAPIホストです。OAuth情報をまだ登録していないため、この時点ではMCP接続は有効になりません。
+7. ChatGPT接続用に、MCP OAuth仕様に対応する既存の認証プロバイダーを用意します。プロバイダーはAuthorization Code + PKCE、`cc:read` と `cc:write` のスコープ、MCPリソースをトークンのaudienceへ反映する機能をサポートする必要があります。認証を許す利用者は自分のアカウントだけに制限してください。OpenAI公式ガイドは独自OAuth実装より既存の認証プロバイダー利用を推奨しています ([MCP authentication](https://developers.openai.com/plugins/build/auth))。
+8. 認証プロバイダーから発行者URL、MCP APIのaudience（`https://<worker-host>/mcp`）、JWKS URLを確認し、次をそれぞれ実行して値をCloudflareへ保存します: `npx wrangler secret put AUTH_ISSUER --config worker/wrangler.toml`、`npx wrangler secret put AUTH_AUDIENCE --config worker/wrangler.toml`、`npx wrangler secret put AUTH_JWKS_URL --config worker/wrangler.toml`。これらはHTMLやJavaScriptに入れません。
+9. `npx wrangler deploy --config worker/wrangler.toml` をもう一度実行して設定を反映します。
+10. Command Centerの「設定」へAPIホストURLと同期キーを入力し、「接続を確認」を押します。続けて初回だけ「この端末から送る」か「クラウドから受け取る」を選びます。選択した側の内容で反対側を置き換える前に確認が表示されます。
+11. ChatGPTのWeb画面で Plugins から「Add custom MCP server」を選び、URLに `https://<worker-host>/mcp` を登録します。表示されたOAuth callback URLを認証プロバイダーの許可リストへ加え、OAuthで接続し、`list_tasks` などの読み書きツールを有効にします。書き込み操作にはChatGPTの確認設定が適用されます ([custom MCP server setup](https://developers.openai.com/api/docs/guides/custom-mcp-server))。
 
-GitHub Pagesをフロントに残し、Cloudflare WorkerをHTTPS APIとOAuthコールバック、D1をユーザー・タスク・イベントの保存先にします。OAuthクライアントシークレットはWorker Secretsに置き、ユーザーごとの更新トークンは暗号化してD1に保存します。Workerでログイン状態、本人のデータだけを返す認可、CSRF対策、厳密なCORSを実装します。[Worker Secrets](https://developers.cloudflare.com/workers/configuration/secrets/)
+同期を開始した後、PWAの変更は自動でクラウドへ保存され、他端末やChatGPT MCPプラグインからの変更は表示中に最大20秒ほどで反映されます。端末ごとにURLと同期キーを一度設定します。同期キーは設定したブラウザのlocalStorageに保存されるため、自分専用の端末でのみ使ってください。タスク・予定のJSONバックアップも継続して利用してください。
 
-2026年10月時点の公表枠では、Workers Freeは1日100,000リクエスト、D1 Freeは1日500万行読み取り・10万行書き込み、合計5GBの保存枠です。日次上限を超えると利用できなくなるため、小規模な個人利用の試作向けであり、将来の料金や枠は変わる可能性があります。[Workers制限](https://developers.cloudflare.com/workers/platform/limits/)、[D1料金と上限](https://developers.cloudflare.com/d1/platform/pricing/)
+### 同期競合
 
-Google Tasksの読み書きは、必要な権限だけを要求するOAuthでWorkerからAPIを呼び出します。公開アプリではOAuth同意画面やスコープの検証が必要になる場合があります。GoogleのOAuthクライアントシークレットや更新トークンをPWAへ配布しません。
+複数の端末が同時に変更した場合、古い内容で新しい内容を黙って上書きしないよう同期を一時停止します。設定画面でクラウドから受け取るか、この端末から送るかを選び直してください。クラウドから受け取ると、この端末にだけ存在する変更は置き換わるため、先にJSONバックアップを保存してください。
 
-## iCloud Calendar
+## 会話から操作する
 
-このCodex環境ではiCloud Calendarコネクタが利用可能ですが、それはChatGPT側の接続であり、このPWAへ認証済みアクセスを渡すものではありません。PWA単体ではApple Accountの資格情報を受け取らず、ICSファイル入出力を提供します。Appleは対応するサードパーティアプリの認可と、非対応アプリ向けのアプリ用パスワードを案内しています。[Appleのサードパーティアプリ設定](https://support.apple.com/en-us/121539)、[アプリ用パスワード](https://support.apple.com/en-us/102654)
+ChatGPT MCPプラグインはOAuthでPWA同期用のキーと分離されています。サーバーのMCPツールは次の操作を提供します:
 
-自動同期を追加する場合は、Appleがサポートする認可方式を調査したうえでCalDAVを扱うバックエンドを設計し、安全に保管するユーザー認証情報が必要です。アプリ用パスワードが必要な方式では、静的サイトへ入れずサーバー側で暗号化して保護してください。Cloudflareの無料枠でもAPIと小規模データ保存を試作できますが、Apple側の認証・連携制限を先に確認してください。まずはICS手動同期を使い、自動同期を作る段階で認証と同期競合の処理を追加してください。
+- タスクと予定の一覧表示
+- タスクと予定の追加・編集・削除
+- 各アイテムの日付、時刻、優先度、分類などの指定
 
-## ChatGPT
+接続後はChatGPTの会話でCommand Centerプラグインを選び、「来週火曜までに企画書を出すタスクを追加」のように依頼します。曖昧な日付や対象を確認し、削除前に確認するようツール説明にも記載しています。ChatGPT公式ガイドによると、MCPサーバーへの書き込み操作は既定で確認を求めます。
 
-ChatGPTからPWAのデータを直接読むことはできません。将来の連携案は、認証付きのAPIを用意し、ChatGPTのGPT ActionなどからそのAPIを呼ぶ方法です。GPT ActionsにはOpenAPIスキーマと認証方式が必要です。[GPT Actionsの設定](https://help.openai.com/en/articles/9442513-gpt-actions-domain-settings-chatgpt-enterprise)
+`worker/openapi.yaml` はREST APIの説明で、GPT Actionsに対応した環境でのみ一時的な互換性に使えます。OpenAIの現行告知では、Custom GPTは移行対象で、標準の提供終了予定は2026年12月11日です。長期利用はMCPプラグインを優先してください ([Custom GPT transition](https://help.openai.com/en/articles/9442513-configuring-actions-in-gpts))。
 
-別案として、OpenAI APIをPWAから直接呼ぶことは避け、サーバー側APIを介します。APIキーをクライアントへ公開しないでください。どちらの場合も、アクセスできるタスク・予定、ユーザー認証、読み書きの確認方法を設計してから実装します。
+## 現時点で接続している外部サービス
 
-## 現在の接続状況
+- **iCloud Calendar**: ChatGPT/Codex側のiCloud Calendarコネクタが利用可能です。Command Center Workerとの直接同期は未実装です。PWAではICSの読み込み・書き出しを使えます。
+- **Google Tasks**: ChatGPT側のTasksBoard接続からタスクリストを確認できます。Command Center Workerとの直接同期は未実装です。ChatGPT側の操作とPWAの同期は別々の接続です。
+- **Command Center API**: MCPプラグインをOAuth接続すれば、会話からCommand Centerのタスク・予定を操作できます。
 
-- iCloud Calendar：Codex側コネクタが利用可能。PWAの自動同期は未接続。
-- Google Tasks：専用コネクタは現在利用可能な接続一覧で確認できず。APIでの独自連携は可能。
-- ChatGPT：API連携は未接続。認証付きバックエンドとAction用APIが必要。
-- Google Calendar：ChatGPT用コネクタは未接続。PWAはICSによる予定の移動に対応。
+Google TasksやiCloudへ直接同期する場合は、Google OAuthまたはAppleがサポートするCalDAV認証を別途実装する必要があります。認証情報はWorker Secretsまたは暗号化されたサーバー側ストレージに置き、PWAのHTML/JavaScriptに埋め込みません。
+
+## APIセキュリティ
+
+- APIは1つの同期キーで保護する個人用構成です。キーを知る人は全データを読み書きできます。
+- ブラウザからのアクセスは、このGitHub Pagesオリジンとlocalhostだけを許可します。ChatGPT MCPの認証はPWA同期キーとは別のOAuthトークンです。
+- APIはBearer認証、リクエストサイズ上限、日付・時刻・優先度の検証、更新リビジョン確認を実施します。
+- 同期キーを紛失した場合はWorker secretを新しい値へ変更し、各PWA端末の設定も更新します。
+- 公開前にCloudflareアカウントと対象リポジトリが本人のものであることを確認してください。

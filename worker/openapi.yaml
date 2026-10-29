@@ -1,0 +1,149 @@
+openapi: 3.1.0
+info:
+  title: Command Center API
+  version: 1.0.0
+  description: Private, single-user task and calendar API for the Command Center.
+servers:
+  - url: https://REPLACE_WITH_WORKER_HOST
+security:
+  - bearerAuth: []
+paths:
+  /v1/tasks:
+    get:
+      operationId: listTasks
+      summary: List tasks
+      responses:
+        '200':
+          description: Current tasks
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items: { $ref: '#/components/schemas/Task' }
+    post:
+      operationId: createTask
+      summary: Add a task
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/TaskInput' }
+      responses:
+        '201':
+          description: Created task
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  item: { $ref: '#/components/schemas/Task' }
+  /v1/tasks/{id}:
+    patch:
+      operationId: updateTask
+      summary: Edit a task
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/TaskInput' }
+      responses:
+        '200': { description: Updated task }
+        '404': { description: Task not found }
+    delete:
+      operationId: deleteTask
+      summary: Delete a task
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      responses:
+        '200': { description: Deleted task }
+        '404': { description: Task not found }
+  /v1/events:
+    get:
+      operationId: listEvents
+      summary: List calendar events
+      responses:
+        '200':
+          description: Current events
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items: { $ref: '#/components/schemas/Event' }
+    post:
+      operationId: createEvent
+      summary: Add a calendar event
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/EventInput' }
+      responses:
+        '201': { description: Created event }
+  /v1/events/{id}:
+    patch:
+      operationId: updateEvent
+      summary: Edit a calendar event
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/EventInput' }
+      responses:
+        '200': { description: Updated event }
+        '404': { description: Event not found }
+    delete:
+      operationId: deleteEvent
+      summary: Delete a calendar event
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      responses:
+        '200': { description: Deleted event }
+        '404': { description: Event not found }
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+  schemas:
+    TaskInput:
+      type: object
+      required: [title]
+      properties:
+        title: { type: string, maxLength: 200 }
+        category: { type: string, maxLength: 80 }
+        dueDate: { type: string, description: YYYY-MM-DD, pattern: '^\d{4}-\d{2}-\d{2}$' }
+        priority: { type: string, enum: [high, medium, low] }
+        done: { type: boolean }
+    Task:
+      allOf:
+        - { $ref: '#/components/schemas/TaskInput' }
+        - type: object
+          properties:
+            id: { type: string }
+            updatedAt: { type: string, format: date-time }
+    EventInput:
+      type: object
+      required: [title, date]
+      properties:
+        title: { type: string, maxLength: 200 }
+        date: { type: string, description: YYYY-MM-DD, pattern: '^\d{4}-\d{2}-\d{2}$' }
+        start: { type: string, description: 'HH:MM' }
+        end: { type: string, description: 'HH:MM' }
+        location: { type: string, maxLength: 200 }
+    Event:
+      allOf:
+        - { $ref: '#/components/schemas/EventInput' }
+        - type: object
+          properties:
+            id: { type: string }
+            updatedAt: { type: string, format: date-time }
