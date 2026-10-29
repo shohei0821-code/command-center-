@@ -13,6 +13,7 @@
 @media(min-width:1450px){.content{padding:28px 34px}.layout{gap:16px}.panel{padding:19px}}
 @media(max-width:1100px){.app{grid-template-columns:205px minmax(0,1fr)}.content{padding:20px}.layout{grid-template-columns:minmax(0,1fr) minmax(0,1fr)}.schedule{grid-column:1;grid-row:1}.tasks-today{grid-column:2;grid-row:1}.quick{grid-column:1;grid-row:2}.all-tasks{grid-column:1;grid-row:3}.activity{grid-column:2;grid-row:2}.right-stack{grid-column:2;grid-row:3}.message{grid-column:1/3;grid-row:4}}
 @media(max-width:700px){.app{display:block}.sidebar{position:sticky;top:0;z-index:5;padding:10px 12px;border-right:0;border-bottom:1px solid var(--line);flex-direction:row;align-items:center;justify-content:space-between}.brand{padding:0;gap:8px}.logo{width:32px;height:32px}.brand strong{font-size:12px}.brand small{font-size:9px}.nav{display:flex;gap:2px}.nav button{padding:8px;border-radius:8px}.nav button span{font-size:17px}.nav button .nav-label{display:none}.side-bottom{display:none}.topbar{height:44px;padding:0 15px}.content{padding:18px 12px 26px}.welcome h1{font-size:20px}.welcome p{font-size:12px}.layout{display:flex;flex-direction:column}.schedule{order:1}.tasks-today{order:2}.quick{order:3}.all-tasks{order:4}.activity{order:5}.right-stack{order:6}.message{order:7}.panel{padding:15px}.task-time{display:none}.quick-list{grid-template-columns:1fr 1fr}.quick-btn{padding:9px;gap:8px}.quick-icon{width:33px;height:33px}.quick-btn small{font-size:10px}.message{align-items:flex-start}.orb{width:42px;height:42px}.message p{font-size:11px}}
+.task-row .link-button{padding:2px 4px;font-size:10px}.task-row .check{flex-shrink:0}.event .link-button{margin-top:7px}.utility-actions{display:flex;gap:8px;flex-wrap:wrap;margin:14px 0}.utility-actions .btn{font-size:12px}.file-input{display:none}
 </style>
 </head>
 <body>
@@ -28,7 +29,7 @@
   </nav>
   <div class="side-bottom">
     <div class="assistant-card"><span class="avatar">C</span><strong>チャッピー</strong><p>いつでも呼んでください。予定とタスクを一緒に管理します。</p></div>
-    <div class="system-card"><span class="system-dot"></span><strong style="font-size:12px">UIプレビュー稼働中</strong><small>外部サービス未接続</small></div>
+    <div class="system-card"><span class="system-dot"></span><strong style="font-size:12px">ローカル保存稼働中</strong><small>このブラウザに保存</small></div>
   </div>
 </aside>
 <main class="main">
@@ -80,65 +81,23 @@
         <div class="task-row"><span class="service-icon google">✓</span><div class="service"><strong>Google Tasks</strong><small>接続設定が必要</small></div><span>›</span></div>
         <div style="font-size:10px;color:var(--muted);margin-top:8px">※ 接続済みとは表示していません。</div>
       </section>
-      <section class="panel progress-card"><h2>Small steps.<br>Big progress.</h2><div class="progress-label"><span>今週のタスク達成率（デモ）</span><strong id="progressText">4 / 10</strong></div><div class="bar"><span id="progressBar"></span></div></section>
+      <section class="panel progress-card"><h2>Small steps.<br>Big progress.</h2><div class="progress-label"><span>完了タスク</span><strong id="progressText">0 / 0</strong></div><div class="bar"><span id="progressBar"></span></div></section>
     </div>
     <section class="panel message"><div class="orb"></div><div><strong>チャッピーからのメッセージ</strong><p>予定とタスクを一か所に。接続後は、実際のデータをもとに次の行動を整理します。</p></div><span class="arrow">›</span></section>
   </div>
-  <p class="demo-note">UIデザイン確認用プレビューです。予定・タスクはすべてサンプルデータで、外部サービスとの同期・通知・アカウント認証はまだ実装されていません。</p>
+  <p class="demo-note">サンプルの予定・タスクから始められます。追加した内容はこのブラウザに保存されます。外部サービスとの自動同期は未接続です。</p>
 </section>
-<section class="view" id="view-calendar"><div class="welcome"><div><div class="date-label">COMMAND CENTER / CALENDAR</div><h1>カレンダー</h1><p>予定を見渡し、時間を組み立てます。</p></div><button class="btn primary" data-modal="event">＋ 予定を追加</button></div><div class="panel section-panel"><div class="panel-head"><h2>今後の予定（サンプル）</h2><span class="tag blue">デモ表示</span></div><p>実際のiCloudカレンダー接続は次の実装段階で行います。</p><div class="event"><div class="name">大学 授業（映画演習）</div><small>09:00 – 12:00 · 日本大学</small></div><div class="event green"><div class="name">編集作業</div><small>13:00 – 15:00 · 自宅</small></div><div class="event purple"><div class="name">特撮部 企画会議</div><small>17:00 – 19:00 · 日藝（部室）</small></div></div></section>
-<section class="view" id="view-tasks"><div class="welcome"><div><div class="date-label">COMMAND CENTER / TASKS</div><h1>タスク</h1><p>やることを整理し、進捗を管理します。</p></div><button class="btn primary" data-modal="task">＋ タスクを追加</button></div><div class="panel section-panel"><div class="panel-head"><h2>タスク一覧</h2><span class="tag blue">サンプルデータ</span></div><p>チェック操作や追加はこの画面のプレビュー内で動作します。再読み込みすると初期状態に戻ります。</p><div id="fullTaskList"></div></div></section>
-<section class="view" id="view-connections"><div class="welcome"><div><div class="date-label">COMMAND CENTER / INTEGRATIONS</div><h1>連携</h1><p>外部サービスの接続を管理します。</p></div></div><div class="panel section-panel"><h2>サービス接続</h2><p>ここでは実際のアカウント接続は行いません。認証情報を入力する必要もありません。</p><div class="integration-box"><div><strong>iCloud カレンダー</strong><p>予定の読み書き・同期</p><span class="status" style="color:var(--amber)">未接続</span></div><button data-action="connection">接続方法を確認</button></div><div class="integration-box"><div><strong>Google Tasks</strong><p>タスクリストの取得・更新</p><span class="status" style="color:var(--amber)">未接続</span></div><button data-action="connection">接続方法を確認</button></div><div class="demo-note">次の実装段階でOAuth認証や安全なサーバー側接続を追加します。パスワードやAPIキーをこのプレビューへ入力しないでください。</div></div></section>
-<section class="view" id="view-settings"><div class="welcome"><div><div class="date-label">COMMAND CENTER / SETTINGS</div><h1>設定</h1><p>表示と通知の動作を調整します。</p></div></div><div class="panel section-panel"><h2>表示設定</h2><div class="integration-box"><div><strong>テーマ</strong><p>ダークテーマを基調にした表示</p></div><button id="themeToggle2">テーマを切り替える</button></div><div class="integration-box"><div><strong>通知</strong><p>通知機能は実装前です</p></div><button data-action="notification">通知仕様を見る</button></div><div class="demo-note">通知を確実に配信するには、アプリの公開・権限設定・バックグラウンド処理の実装とテストが必要です。</div></div></section>
+<section class="view" id="view-calendar"><div class="welcome"><div><div class="date-label">COMMAND CENTER / CALENDAR</div><h1>カレンダー</h1><p>予定を見渡し、時間を組み立てます。</p></div><button class="btn primary" data-modal="event">＋ 予定を追加</button></div><div class="panel section-panel"><div class="panel-head"><h2>予定一覧</h2><span class="tag blue">この端末に保存</span></div><p>ICSファイルを読み込むと既存予定に追加されます。書き出したファイルはAppleカレンダーなどへ読み込めます。</p><div class="utility-actions"><button class="btn" id="importCalendar">ICSを読み込む</button><button class="btn" id="exportCalendar">ICSを書き出す</button></div><input class="file-input" id="icsFile" type="file" accept=".ics,text/calendar"><div id="calendarEvents"></div></div></section>
+<section class="view" id="view-tasks"><div class="welcome"><div><div class="date-label">COMMAND CENTER / TASKS</div><h1>タスク</h1><p>やることを整理し、進捗を管理します。</p></div><button class="btn primary" data-modal="task">＋ タスクを追加</button></div><div class="panel section-panel"><div class="panel-head"><h2>タスク一覧</h2><span class="tag blue">この端末に保存</span></div><p>タスクの追加・編集・削除・完了状態はこのブラウザに自動保存されます。</p><div id="fullTaskList"></div></div></section>
+<section class="view" id="view-connections"><div class="welcome"><div><div class="date-label">COMMAND CENTER / INTEGRATIONS</div><h1>連携</h1><p>外部サービスの接続を管理します。</p></div></div><div class="panel section-panel"><h2>サービス接続</h2><p>認証情報をこの画面に入力しないでください。ICSによるカレンダー移動は「カレンダー」から利用できます。</p><div class="integration-box"><div><strong>iCloud カレンダー</strong><p>手動: カレンダーでICSを書き出し、Appleカレンダーへ読み込み。自動同期には安全なサーバー側CalDAV接続が必要です。</p><span class="status" style="color:var(--amber)">PWA未接続</span></div><a class="btn" href="https://github.com/shohei0821-code/command-center-/blob/main/INTEGRATIONS.md" target="_blank" rel="noopener">設定ガイド</a></div><div class="integration-box"><div><strong>Google Tasks</strong><p>APIにはGoogle OAuth同意画面が必要です。読み取り専用または編集権限を選ぶバックエンドを用意します。</p><span class="status" style="color:var(--amber)">PWA未接続</span></div><a class="btn" href="https://developers.google.com/workspace/tasks/auth" target="_blank" rel="noopener">Google公式ガイド</a></div><div class="integration-box"><div><strong>ChatGPT</strong><p>認証付きAPIとGPT Action用OpenAPIスキーマを用意してから接続します。</p><span class="status" style="color:var(--amber)">PWA未接続</span></div><a class="btn" href="https://github.com/shohei0821-code/command-center-/blob/main/INTEGRATIONS.md" target="_blank" rel="noopener">設定ガイド</a></div><div class="demo-note">Codex側のiCloud Calendarコネクタが使える状態でも、このPWAにログイン情報やカレンダー権限が共有されるわけではありません。</div></div></section>
+<section class="view" id="view-settings"><div class="welcome"><div><div class="date-label">COMMAND CENTER / SETTINGS</div><h1>設定</h1><p>表示と通知の動作を調整します。</p></div></div><div class="panel section-panel"><h2>表示設定とデータ</h2><div class="integration-box"><div><strong>テーマ</strong><p>表示設定はこのブラウザに保存されます。</p></div><button id="themeToggle2">テーマを切り替える</button></div><div class="integration-box"><div><strong>バックアップ</strong><p>タスク・予定・テーマをJSONで保存、または復元します。</p></div><div class="utility-actions"><button class="btn" id="exportData">バックアップを書き出す</button><button class="btn" id="importData">読み込む</button></div></div><input class="file-input" id="jsonFile" type="file" accept="application/json,.json"><div class="integration-box"><div><strong>通知</strong><p>通知機能は実装前です</p></div><button data-action="notification">通知仕様を見る</button></div><div class="demo-note">データはブラウザごとに保存され、端末間では自動同期されません。定期的にバックアップを書き出してください。</div></div></section>
 </div>
 </main>
 </div>
 <div class="notice" id="notice" role="status"></div>
 <div class="modal-backdrop" id="modalBackdrop"><div class="modal" role="dialog" aria-modal="true" aria-labelledby="modalTitle"><h2 id="modalTitle">追加</h2><form id="itemForm"><div class="field"><label for="itemName">名称</label><input id="itemName" required maxlength="100" placeholder="例：企画書を仕上げる"></div><div class="field"><label for="itemDate">日付</label><input id="itemDate" type="date"></div><div class="field" id="timeField"><label for="itemTime">時刻（予定の場合）</label><input id="itemTime" type="time" value="09:00"></div><div class="field"><label for="itemGroup">分類</label><select id="itemGroup"><option>個人</option><option>大学</option><option>特撮部</option><option>EVIL CHASER</option><option>実験室</option></select></div><div class="modal-actions"><button type="button" class="btn" id="cancelModal">キャンセル</button><button type="submit" class="btn primary">プレビューに追加</button></div></form></div></div>
-<script>
-const $=(s,r=document)=>r.querySelector(s), $$=(s,r=document)=>[...r.querySelectorAll(s)];
-const notice=$('#notice');let noticeTimer;function toast(msg){notice.textContent=msg;notice.classList.add('show');clearTimeout(noticeTimer);noticeTimer=setTimeout(()=>notice.classList.remove('show'),2600)}
-function go(view){$$('.nav button').forEach(b=>b.classList.toggle('active',b.dataset.view===view));$$('.view').forEach(v=>v.classList.toggle('active',v.id==='view-'+view));window.scrollTo({top:0,behavior:'smooth'});if(view==='tasks')renderFullTasks()}
-$$('[data-view]').forEach(b=>b.addEventListener('click',()=>go(b.dataset.view)));$$('[data-go]').forEach(b=>b.addEventListener('click',()=>go(b.dataset.go)));
-const now=new Date();$('#todayHeading').textContent=`${now.getFullYear()}年${now.getMonth()+1}月${now.getDate()}日（${'日月火水木金土'[now.getDay()]}）`;
-$$('.check').forEach(c=>c.addEventListener('change',()=>{const row=c.closest('.task-row');if(row){row.style.opacity=c.checked?'.55':'1';const t=$('.task-copy strong',row);if(t)t.style.textDecoration=c.checked?'line-through':'none'}updateProgress()}));
-function updateProgress(){const all=$$('.all-tasks .check');const done=all.filter(c=>c.checked).length;$('#progressText').textContent=`${Math.min(4+done,10)} / 10`;$('#progressBar').style.width=`${Math.min(4+done,10)*10}%`}
-$$('[data-filter]').forEach(b=>b.addEventListener('click',()=>{const f=b.dataset.filter;$$('[data-filter]').forEach(x=>x.classList.toggle('active',x===b));$$('#taskTable .task-row').forEach(row=>{const checked=$('.check',row).checked;row.style.display=f==='all'?'flex':f==='done'?(checked?'flex':'none'):(!checked&&row.dataset.day===f?'flex':'none')})}));
-let modalType='task';$$('[data-modal]').forEach(b=>b.addEventListener('click',()=>openModal(b.dataset.modal)));
-function openModal(type){modalType=type;$('#modalTitle').textContent=type==='event'?'予定を追加':'タスクを追加';$('#timeField').style.display=type==='event'?'grid':'none';$('#itemName').value='';const d=new Date();$('#itemDate').value=`${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;$('#modalBackdrop').classList.add('open');setTimeout(()=>$('#itemName').focus(),50)}
-$('#cancelModal').addEventListener('click',()=>$('#modalBackdrop').classList.remove('open'));$('#modalBackdrop').addEventListener('click',e=>{if(e.target===$('#modalBackdrop'))$('#modalBackdrop').classList.remove('open')});
-let customTasks=[];$('#itemForm').addEventListener('submit',e=>{e.preventDefault();const item={name:$('#itemName').value.trim(),date:$('#itemDate').value,group:$('#itemGroup').value,time:$('#itemTime').value,type:modalType,done:false};if(!item.name)return;customTasks.unshift(item);$('#modalBackdrop').classList.remove('open');toast(`${modalType==='event'?'予定':'タスク'}をプレビューに追加しました`);if(modalType==='task')renderFullTasks()});
-function renderFullTasks(){const root=$('#fullTaskList');root.innerHTML='';const original=$$('#taskTable .task-row').map(row=>({name:$('.task-copy strong',row).textContent,group:$('.task-copy small',row).textContent,done:$('.check',row).checked}));[...customTasks.filter(t=>t.type==='task'),...original].forEach(t=>{const row=document.createElement('div');row.className='task-row';const cb=document.createElement('input');cb.type='checkbox';cb.className='check';cb.checked=!!t.done;const copy=document.createElement('div');copy.className='task-copy';const strong=document.createElement('strong');strong.textContent=t.name;const small=document.createElement('small');small.textContent=t.group||'追加タスク';copy.append(strong,small);row.append(cb,copy);root.append(row);cb.addEventListener('change',()=>{strong.style.textDecoration=cb.checked?'line-through':'none';row.style.opacity=cb.checked?'.55':'1';t.done=cb.checked})})}
-$$('[data-action="connection"]').forEach(b=>b.addEventListener('click',()=>toast('次の段階で安全な認証フローを実装します。')));
-$$('[data-action="notification"]').forEach(b=>b.addEventListener('click',()=>toast('通知の時刻・条件を次の実装段階で設定できるようにします。')));
-$('#notifBtn').addEventListener('click',()=>toast('通知機能はまだ未実装です。'));function toggleTheme(){document.body.classList.toggle('light');if(document.body.classList.contains('light')){document.body.style.setProperty('--bg','#edf3fb');document.body.style.setProperty('--panel','#fff');document.body.style.setProperty('--text','#132238');document.body.style.setProperty('--muted','#5f7188');document.body.style.setProperty('--line','#cbd7e5');toast('明るい表示に切り替えました')}else{['--bg','--panel','--text','--muted','--line'].forEach(x=>document.body.style.removeProperty(x));toast('ダーク表示に戻しました')}}$('#themeBtn').addEventListener('click',toggleTheme);$('#themeToggle2').addEventListener('click',toggleTheme);
-renderFullTasks();
-</script>
+<script src="./app.js"></script>
 
-<script>
-// Prototype persistence: stores only this prototype's demo data in this browser.
-(function(){
- const KEY='command-center-prototype-v1';
- const originalChecks=()=>$$('.all-tasks .task-row .check');
- function load(){try{return JSON.parse(localStorage.getItem(KEY)||'{}')}catch(e){return {}}}
- function save(){const data={customTasks,checks:originalChecks().map(c=>c.checked),theme:document.body.classList.contains('light')};try{localStorage.setItem(KEY,JSON.stringify(data))}catch(e){}}
- const oldRender=renderFullTasks;
- renderFullTasks=function(){const data=load();if(Array.isArray(data.customTasks))customTasks=data.customTasks;oldRender();};
- const previousToast=toast;
- // Rehydrate task state after the UI's initial setup.
- const data=load();
- if(Array.isArray(data.customTasks)) customTasks=data.customTasks;
- if(Array.isArray(data.checks)) originalChecks().forEach((c,i)=>{if(typeof data.checks[i]==='boolean'){c.checked=data.checks[i];const row=c.closest('.task-row');row.style.opacity=c.checked?'.55':'1';const t=$('.task-copy strong',row);if(t)t.style.textDecoration=c.checked?'line-through':'none'}});
- if(data.theme){document.body.classList.add('light');document.body.style.setProperty('--bg','#edf3fb');document.body.style.setProperty('--panel','#fff');document.body.style.setProperty('--text','#132238');document.body.style.setProperty('--muted','#5f7188');document.body.style.setProperty('--line','#cbd7e5')}
- document.addEventListener('change',e=>{if(e.target.matches('.check'))save()});
- const form=$('#itemForm');form.addEventListener('submit',()=>setTimeout(save,0));
- $('#themeBtn').addEventListener('click',()=>setTimeout(save,0));$('#themeToggle2').addEventListener('click',()=>setTimeout(save,0));
- // Preserve prototype additions across page refreshes.
- const origSubmit=form.onsubmit;
- window.addEventListener('beforeunload',save);
- if('serviceWorker' in navigator && /^https?:$/.test(location.protocol)){navigator.serviceWorker.register('./sw.js').catch(()=>{});}
-})();
-</script>
 
 </body>
 </html>
