@@ -155,7 +155,18 @@
   $$('[data-action="notification"]').forEach(b => b.addEventListener('click', () => toast('通知は今後の拡張項目です。')));
 
   const syncStatus = $('#syncStatus');
-  function showSyncStatus(message) { if (syncStatus) syncStatus.textContent = message; }
+  function showSyncStatus(message) {
+    if (syncStatus) syncStatus.textContent = message;
+    const title = $('#saveStatusTitle'), detail = $('#saveStatusDetail');
+    if (!title || !detail) return;
+    if (cloudAuto) {
+      title.textContent = 'クラウド同期稼働中'; detail.textContent = 'Cloudflareへ自動同期';
+    } else if (cloudConfig?.enabled) {
+      title.textContent = '同期を確認できません'; detail.textContent = 'ローカル保存中';
+    } else {
+      title.textContent = 'ローカル保存稼働中'; detail.textContent = 'このブラウザに保存';
+    }
+  }
   function configFromForm() {
     const endpoint = $('#syncEndpoint').value.trim().replace(/\/+$/, '');
     const token = $('#syncToken').value.trim();
