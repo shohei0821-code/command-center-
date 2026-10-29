@@ -1,8 +1,8 @@
-name = "command-center-api"
+name = "command-center-sync"
 main = "index.js"
 compatibility_date = "2026-10-29"
 
 [[d1_databases]]
 binding = "DB"
 database_name = "command-center"
-database_id = "REPLACE_WITH_D1_DATABASE_ID"
+database_id = "92bb8921-6184-45f5-8a75-7ad964b6d2f2"
