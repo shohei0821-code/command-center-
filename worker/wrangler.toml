@@ -1,6 +1,7 @@
 name = "command-center-sync"
 main = "index.js"
 compatibility_date = "2026-10-29"
+keep_vars = true
 
 [[d1_databases]]
 binding = "DB"

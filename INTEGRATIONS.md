@@ -2,6 +2,8 @@
 
 Command Centerは通常、端末内にタスクと予定を保存します。`worker/` にはCloudflare Worker + D1の個人用同期APIと、OAuthで保護したChatGPT MCP接続口を用意しています。APIを一度公開すると、複数端末のPWAとChatGPTから同じタスク・予定を読み書きできます。Google TasksとiCloud Calendarへの直接同期は別機能で、このAPIはそれらへ自動転送しません。
 
+このリポジトリはCloudflare Workers Buildsに接続し、`main` ブランチの変更を `/worker` から `npx wrangler deploy` で反映する構成です。`worker/wrangler.toml` には本番D1データベースIDを設定済みです。`API_TOKEN` などの秘密情報はCloudflareのWorker Secretsに保存し、リポジトリには置きません。
+
 ## CloudflareへAPIを公開する
 
 この手順はCloudflareアカウントが必要です。現行のFree枠は小規模な個人利用の試作に足ります。公表上の上限はWorkersが1日10万リクエスト、D1が1日500万行読み取り・10万行書き込み・合計5GBです。D1の日次上限を超えると、その日の残りはクエリが失敗するため、利用量はCloudflareダッシュボードで確認してください ([Workers limits](https://developers.cloudflare.com/workers/platform/limits/), [D1 pricing](https://developers.cloudflare.com/d1/platform/pricing/))。
