@@ -154,6 +154,109 @@
   $$('[data-action="connection"]').forEach(b => b.addEventListener('click', () => go('connections')));
   $$('[data-action="notification"]').forEach(b => b.addEventListener('click', () => toast('通知は今後の拡張項目です。')));
 
+  // Wake-word voice control runs only after the user turns on the microphone.
+  const voiceButton = $('#voiceToggle'), voiceStatus = $('#voiceStatus');
+  const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+  let voiceRecognition = null, voiceListening = false, wakeUntil = 0, pendingVoiceDelete = null;
+  function voiceSay(message) {
+    voiceStatus.textContent = message;
+    if ('speechSynthesis' in window) {
+      window.speechSynthesis.cancel();
+      const utterance = new SpeechSynthesisUtterance(message); utterance.lang = 'ja-JP';
+      window.speechSynthesis.speak(utterance);
+    }
+  }
+  function parseVoiceDate(text) {
+    const base = new Date();
+    if (/明後日|あさって/.test(text)) base.setDate(base.getDate() + 2);
+    else if (/明日|あした/.test(text)) base.setDate(base.getDate() + 1);
+    const explicit = text.match(/(20\d{2})年(\d{1,2})月(\d{1,2})日/);
+    if (explicit) return `${explicit[1]}-${String(explicit[2]).padStart(2,'0')}-${String(explicit[3]).padStart(2,'0')}`;
+    return dateKey(base);
+  }
+  function voiceTitle(text) {
+    return text.replace(/チャッピー/g,'').replace(/20\d{2}年\d{1,2}月\d{1,2}日/g,'')
+      .replace(/明後日|あさって|明日|あした|今日|きょう/g,'')
+      .replace(/(?:午前|午後)?\d{1,2}時(?:\d{1,2}分)?/g,'')
+      .replace(/(?:タスク|todo|予定|カレンダー)(?:を)?(?:追加|登録|作成)(?:して|する|してください|お願い)?/gi,'')
+      .replace(/(?:タスク|予定)(?:を)?(?:完了|終わり|削除|消して|変更)(?:に|して|する|してください)?/g,'')
+      .replace(/までに|まで|に追加|を追加|として|お願い|ください|です|ます|して/g,'')
+      .replace(/[。、，,]/g,' ').trim().replace(/\s+/g,' ');
+  }
+  function voiceTime(text) {
+    const m = text.match(/(午前|午後)?(\d{1,2})時(?:(\d{1,2})分)?/);
+    if (!m) return '09:00';
+    let hour = Number(m[2]); if (m[1] === '午後' && hour < 12) hour += 12; if (m[1] === '午前' && hour === 12) hour = 0;
+    return `${String(hour).padStart(2,'0')}:${String(Number(m[3] || 0)).padStart(2,'0')}`;
+  }
+  function handleVoiceCommand(raw) {
+    const command = raw.trim();
+    if (!command) return;
+    if (pendingVoiceDelete && /^(はい|削除して|実行|確認)$/.test(command)) {
+      const {kind,id,title} = pendingVoiceDelete; pendingVoiceDelete = null;
+      if (kind === 'task') state.tasks = state.tasks.filter(x => x.id !== id); else state.events = state.events.filter(x => x.id !== id);
+      render(); voiceSay(`${title}を削除しました`); return;
+    }
+    if (pendingVoiceDelete) { pendingVoiceDelete = null; voiceSay('削除を取り消しました'); return; }
+    const wantsTask = /タスク|todo/i.test(command), wantsEvent = /予定|カレンダー/.test(command);
+    const deleting = /削除|消して/.test(command), completing = /完了|終わった|済みに/.test(command);
+    if ((wantsTask || wantsEvent) && (deleting || completing)) {
+      const title = voiceTitle(command);
+      const items = wantsTask ? state.tasks : state.events;
+      const matches = items.filter(item => title && item.title.includes(title));
+      if (matches.length !== 1) { voiceSay(matches.length ? '候補が複数あります。画面から選んでください' : '該当する項目が見つかりません'); return; }
+      const item = matches[0];
+      if (deleting) { pendingVoiceDelete = {kind:wantsTask ? 'task':'event',id:item.id,title:item.title}; voiceSay(`${item.title}を削除しますか。実行するなら、はいと言ってください`); return; }
+      if (!wantsTask) { voiceSay('予定の完了操作には対応していません'); return; }
+      item.done = true; render(); voiceSay(`${item.title}を完了にしました`); return;
+    }
+    if ((wantsTask || wantsEvent) && /追加|登録|作成/.test(command)) {
+      const title = voiceTitle(command);
+      if (!title) { voiceSay('追加する内容をもう一度話してください'); return; }
+      const date = parseVoiceDate(command), id = crypto.randomUUID ? crypto.randomUUID() : String(Date.now());
+      if (wantsEvent) {
+        const start = voiceTime(command), [hour,minute] = start.split(':').map(Number), end = `${String((hour + 1) % 24).padStart(2,'0')}:${String(minute).padStart(2,'0')}`;
+        state.events.unshift({id,title,date,start,end,location:'',sample:false});
+        render(); voiceSay(`${date} ${start}に、${title}を予定へ追加しました`); return;
+      }
+      state.tasks.unshift({id,title,dueDate:date,category:'個人',priority:'medium',done:false,sample:false});
+      render(); voiceSay(`${date}までのタスク、${title}を追加しました`); return;
+    }
+    if (/タスク|todo/.test(command) && /一覧|何が|教えて/.test(command)) {
+      const open = state.tasks.filter(x => !x.done);
+      voiceSay(open.length ? `未完了のタスクは${open.length}件です。画面に一覧を表示しました` : '未完了のタスクはありません'); go('tasks'); return;
+    }
+    voiceSay('タスクや予定の追加、完了、削除ができます。たとえば「タスクを追加して、明日までに書類を出す」と話してください');
+  }
+  if (!SpeechRecognition) {
+    voiceStatus.textContent = 'このブラウザーは音声認識に対応していません'; voiceButton.disabled = true;
+  } else {
+    voiceRecognition = new SpeechRecognition(); voiceRecognition.lang = 'ja-JP'; voiceRecognition.continuous = true; voiceRecognition.interimResults = false;
+    voiceRecognition.onresult = event => {
+      for (let i = event.resultIndex; i < event.results.length; i++) {
+        if (!event.results[i].isFinal) continue;
+        const spoken = event.results[i][0].transcript.trim();
+        const wake = spoken.match(/チャッピー[、,。\s]*(.*)/);
+        if (wake) {
+          const command = (wake[1] || '').trim();
+          if (command) { wakeUntil = 0; handleVoiceCommand(command); }
+          else { wakeUntil = Date.now() + 9000; voiceSay('はい、どうぞ'); }
+        } else if (Date.now() < wakeUntil) { wakeUntil = 0; handleVoiceCommand(spoken); }
+      }
+    };
+    voiceRecognition.onerror = event => {
+      if (event.error === 'not-allowed' || event.error === 'service-not-allowed') { voiceListening = false; voiceButton.setAttribute('aria-pressed','false'); voiceStatus.textContent = 'マイク利用が許可されていません。ブラウザーの設定をご確認ください'; }
+      else if (event.error !== 'no-speech' && voiceListening) voiceStatus.textContent = '音声を認識できません。もう一度「チャッピー」と呼んでください';
+    };
+    voiceRecognition.onend = () => { if (voiceListening) { try { voiceRecognition.start(); } catch (_) {} } };
+    voiceButton.addEventListener('click', () => {
+      voiceListening = !voiceListening; voiceButton.setAttribute('aria-pressed', String(voiceListening));
+      voiceButton.setAttribute('aria-label', voiceListening ? 'チャッピーの音声操作を停止' : 'チャッピーの音声操作を開始');
+      if (voiceListening) { voiceStatus.textContent = '待機中。「チャッピー」と呼びかけてください'; try { voiceRecognition.start(); } catch (_) { voiceListening = false; voiceButton.setAttribute('aria-pressed','false'); voiceStatus.textContent = '音声認識を開始できません。ページを再読み込みしてからお試しください'; } }
+      else { voiceRecognition.stop(); voiceStatus.textContent = '音声操作を停止しました'; }
+    });
+  }
+
   const syncStatus = $('#syncStatus');
   function showSyncStatus(message) {
     if (syncStatus) syncStatus.textContent = message;
