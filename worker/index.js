@@ -1,5 +1,7 @@
 const EMPTY = { tasks: [], events: [], theme: 'dark' };
 const MAX_STATE_BYTES = 500_000;
+const GOOGLE_SCOPE = 'https://www.googleapis.com/auth/tasks';
+const APP_URL = 'https://shohei0821-code.github.io/command-center-/';
 
 function cors(request) {
   const origin = request.headers.get('Origin') || '';
@@ -15,6 +17,162 @@ function cors(request) {
 
 function json(request, body, status = 200, extra = {}) {
   return new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json; charset=utf-8', ...cors(request), ...extra } });
+}
+
+async function ensureGoogleSchema(db) {
+  await db.prepare(`CREATE TABLE IF NOT EXISTS google_oauth (
+    id TEXT PRIMARY KEY CHECK (id = 'google'),
+    ciphertext TEXT NOT NULL,
+    iv TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+  )`).run();
+  await db.prepare(`CREATE TABLE IF NOT EXISTS google_oauth_states (
+    state_hash TEXT PRIMARY KEY,
+    expires_at INTEGER NOT NULL
+  )`).run();
+  await db.prepare(`CREATE TABLE IF NOT EXISTS google_task_links (
+    local_id TEXT PRIMARY KEY,
+    list_id TEXT NOT NULL,
+    google_id TEXT NOT NULL,
+    baseline TEXT NOT NULL,
+    UNIQUE(list_id, google_id)
+  )`).run();
+}
+
+function hexBytes(hex) {
+  if (!/^[a-f0-9]{64}$/i.test(hex || '')) throw new Error('Google credential encryption key is not configured');
+  return Uint8Array.from(hex.match(/.{2}/g), part => parseInt(part, 16));
+}
+
+async function credentialKey(env) {
+  return crypto.subtle.importKey('raw', hexBytes(env.CREDENTIALS_KEY), 'AES-GCM', false, ['encrypt', 'decrypt']);
+}
+
+async function encryptCredentials(env, credentials) {
+  const iv = crypto.getRandomValues(new Uint8Array(12));
+  const data = new TextEncoder().encode(JSON.stringify(credentials));
+  const ciphertext = await crypto.subtle.encrypt({name:'AES-GCM', iv}, await credentialKey(env), data);
+  return {iv:btoa(String.fromCharCode(...iv)), ciphertext:btoa(String.fromCharCode(...new Uint8Array(ciphertext)))};
+}
+
+async function decryptCredentials(env, row) {
+  const ciphertext = Uint8Array.from(atob(row.ciphertext), char => char.charCodeAt(0));
+  const iv = Uint8Array.from(atob(row.iv), char => char.charCodeAt(0));
+  const plain = await crypto.subtle.decrypt({name:'AES-GCM', iv}, await credentialKey(env), ciphertext);
+  return JSON.parse(new TextDecoder().decode(plain));
+}
+
+let googleCachedAccessToken = '', googleAccessTokenExpiresAt = 0;
+async function googleAccessToken(db, env) {
+  if (googleCachedAccessToken && Date.now() < googleAccessTokenExpiresAt - 60_000) return googleCachedAccessToken;
+  const row = await db.prepare("SELECT ciphertext, iv FROM google_oauth WHERE id = 'google'").first();
+  if (!row) throw Object.assign(new Error('Google Tasks is not connected'), {status:409});
+  const credentials = await decryptCredentials(env, row);
+  const response = await fetch('https://oauth2.googleapis.com/token', {
+    method:'POST', headers:{'Content-Type':'application/x-www-form-urlencoded'},
+    body:new URLSearchParams({client_id:env.GOOGLE_CLIENT_ID, client_secret:env.GOOGLE_CLIENT_SECRET, refresh_token:credentials.refresh_token, grant_type:'refresh_token'})
+  });
+  const token = await response.json().catch(() => ({}));
+  if (!response.ok || !token.access_token) throw Object.assign(new Error('Google token refresh failed. Reconnect Google Tasks.'), {status:502});
+  googleCachedAccessToken = token.access_token; googleAccessTokenExpiresAt = Date.now() + (Number(token.expires_in) || 3600) * 1000;
+  return googleCachedAccessToken;
+}
+
+async function googleApi(db, env, path, options = {}) {
+  const accessToken = await googleAccessToken(db, env);
+  const response = await fetch('https://tasks.googleapis.com/tasks/v1' + path, {
+    ...options, headers:{Authorization:'Bearer ' + accessToken, ...(options.body ? {'Content-Type':'application/json'} : {}), ...(options.headers || {})}
+  });
+  const payload = await response.json().catch(() => ({}));
+  if (!response.ok) throw Object.assign(new Error(payload.error?.message || 'Google Tasks request failed'), {status:response.status});
+  return payload;
+}
+
+async function listGoogleTasks(db, env, listId) {
+  const items = []; let pageToken = '';
+  for (let page = 0; page < 50; page++) {
+    const query = new URLSearchParams({maxResults:'100',showCompleted:'true',showHidden:'true'});
+    if (pageToken) query.set('pageToken',pageToken);
+    const result = await googleApi(db,env,'/lists/' + encodeURIComponent(listId) + '/tasks?' + query);
+    items.push(...(result.items || []));
+    if (items.length > 5000) throw Object.assign(new Error('Google list exceeds the 5,000 task sync limit'), {status:413});
+    pageToken = result.nextPageToken || '';
+    if (!pageToken) return items;
+  }
+  throw Object.assign(new Error('Google list has too many pages to sync safely'), {status:413});
+}
+
+async function writeGoogleTask(db, env, listId, task, googleTaskId = '') {
+  const body = {title:task.title, status:task.done ? 'completed' : 'needsAction', ...(task.dueDate ? {due:task.dueDate+'T00:00:00.000Z'} : {due:null})};
+  const path = '/lists/' + encodeURIComponent(listId) + '/tasks' + (googleTaskId ? '/' + encodeURIComponent(googleTaskId) : '');
+  return googleApi(db,env,path,{method:googleTaskId?'PATCH':'POST',body:JSON.stringify(body)});
+}
+
+async function upsertGoogleTaskLink(db, localId, listId, googleId, baseline) {
+  await db.prepare(`INSERT INTO google_task_links (local_id, list_id, google_id, baseline) VALUES (?, ?, ?, ?)
+    ON CONFLICT(local_id) DO UPDATE SET list_id=excluded.list_id, google_id=excluded.google_id, baseline=excluded.baseline`)
+    .bind(localId,listId,googleId,JSON.stringify(baseline)).run();
+}
+
+async function syncGoogleTaskList(db, env, listId, suppliedTasks) {
+  const remoteItems = await listGoogleTasks(db,env,listId);
+  const localTasks = suppliedTasks.map(task => ({...normalizeTask(task,{id:cleanText(task?.id,100)}),sample:task?.sample === true}));
+  const localById = new Map(localTasks.map(task=>[task.id,task]));
+  const remoteById = new Map(remoteItems.map(task=>[task.id,task]));
+  const links = await db.prepare('SELECT local_id, google_id, baseline FROM google_task_links WHERE list_id = ?').bind(listId).all();
+  const linkByLocal = new Map((links.results || []).map(link=>[link.local_id,link]));
+  const allLinked = new Set(((await db.prepare('SELECT local_id FROM google_task_links').all()).results || []).map(link=>link.local_id));
+  const resultByLocal = new Map(localTasks.map(task=>[task.id,task]));
+  const matchedRemote = new Set();
+
+  for (const link of linkByLocal.values()) {
+    const local = localById.get(link.local_id); const remote = remoteById.get(link.google_id);
+    let baseline = {};
+    try { baseline = JSON.parse(link.baseline); } catch (_) {}
+    if (!local) {
+      if (remote) await googleApi(db,env,'/lists/'+encodeURIComponent(listId)+'/tasks/'+encodeURIComponent(remote.id),{method:'DELETE'});
+      await db.prepare('DELETE FROM google_task_links WHERE local_id = ?').bind(link.local_id).run();
+      matchedRemote.add(link.google_id); continue;
+    }
+    if (!remote) {
+      if (!sameTaskProjection(taskProjection(local),baseline)) {
+        const recreated = await writeGoogleTask(db,env,listId,local);
+        await upsertGoogleTaskLink(db,local.id,listId,recreated.id,taskProjection(local));
+      } else {
+        resultByLocal.delete(local.id);
+        await db.prepare('DELETE FROM google_task_links WHERE local_id = ?').bind(local.id).run();
+      }
+      continue;
+    }
+    matchedRemote.add(remote.id);
+    const localProjection = taskProjection(local), remoteProjection = googleTaskProjection(remote);
+    const localChanged = !sameTaskProjection(localProjection,baseline);
+    const remoteChanged = !sameTaskProjection(remoteProjection,baseline);
+    let finalProjection = remoteProjection;
+    if (localChanged && (!remoteChanged || Date.parse(local.updatedAt || 0) >= Date.parse(remote.updated || 0))) {
+      const saved = await writeGoogleTask(db,env,listId,local,remote.id);
+      finalProjection = taskProjection(local);
+      remote.updated = saved.updated || new Date().toISOString();
+    } else if (remoteChanged) {
+      resultByLocal.set(local.id,{...local,...remoteProjection,updatedAt:remote.updated || new Date().toISOString(),sample:false});
+    }
+    await upsertGoogleTaskLink(db,local.id,listId,remote.id,finalProjection);
+  }
+
+  for (const remote of remoteItems) {
+    if (matchedRemote.has(remote.id)) continue;
+    const id = crypto.randomUUID(); const projected = googleTaskProjection(remote);
+    resultByLocal.set(id,{id,...projected,category:'Google Tasks',priority:'medium',sample:false,updatedAt:remote.updated || new Date().toISOString()});
+    await upsertGoogleTaskLink(db,id,listId,remote.id,projected);
+  }
+
+  for (const local of localTasks) {
+    if (allLinked.has(local.id) || local.sample) continue;
+    const created = await writeGoogleTask(db,env,listId,local);
+    await upsertGoogleTaskLink(db,local.id,listId,created.id,taskProjection(local));
+    allLinked.add(local.id);
+  }
+  return [...resultByLocal.values()];
 }
 
 function cleanText(value, max = 200) {
@@ -34,10 +192,20 @@ function normalizeTask(input, current = {}) {
     priority,
     dueDate: /^\d{4}-\d{2}-\d{2}$/.test(dueDate) ? dueDate : '',
     done: typeof input.done === 'boolean' ? input.done : !!current.done,
-    sample: false,
-    updatedAt: new Date().toISOString()
+    sample: input.sample === true,
+    updatedAt: cleanText(input.updatedAt, 40) || new Date().toISOString()
   };
 }
+
+function taskProjection(task) {
+  return {title:cleanText(task.title,200),dueDate:/^\d{4}-\d{2}-\d{2}$/.test(task.dueDate || '') ? task.dueDate : '',done:!!task.done};
+}
+
+function googleTaskProjection(task) {
+  return {title:cleanText(task.title,200),dueDate:/^\d{4}-\d{2}-\d{2}$/.test((task.due || '').slice(0,10)) ? task.due.slice(0,10) : '',done:task.status === 'completed'};
+}
+
+function sameTaskProjection(a,b) { return JSON.stringify(a) === JSON.stringify(b); }
 
 function normalizeEvent(input, current = {}) {
   const title = cleanText(input.title ?? current.title);
@@ -187,6 +355,37 @@ export default {
     }
     if (!env.DB) return json(request, {error:'Database is not configured'}, 503);
 
+    if (url.pathname === '/oauth/google/callback' && request.method === 'GET') {
+      try {
+        await ensureGoogleSchema(env.DB);
+        const state = url.searchParams.get('state') || '';
+        const stateHash = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(state));
+        const encodedHash = btoa(String.fromCharCode(...new Uint8Array(stateHash)));
+        const savedState = await env.DB.prepare('SELECT expires_at FROM google_oauth_states WHERE state_hash = ?').bind(encodedHash).first();
+        await env.DB.prepare('DELETE FROM google_oauth_states WHERE state_hash = ?').bind(encodedHash).run();
+        if (!state || !savedState || savedState.expires_at < Math.floor(Date.now()/1000)) return Response.redirect(APP_URL + '?google=state-error', 302);
+        if (url.searchParams.get('error')) return Response.redirect(APP_URL + '?google=cancelled', 302);
+        if (!env.GOOGLE_CLIENT_ID || !env.GOOGLE_CLIENT_SECRET || !env.CREDENTIALS_KEY) return Response.redirect(APP_URL + '?google=server-config-error', 302);
+        const tokenResponse = await fetch('https://oauth2.googleapis.com/token', {
+          method:'POST', headers:{'Content-Type':'application/x-www-form-urlencoded'},
+          body:new URLSearchParams({code:url.searchParams.get('code') || '', client_id:env.GOOGLE_CLIENT_ID, client_secret:env.GOOGLE_CLIENT_SECRET, redirect_uri:url.origin + '/oauth/google/callback', grant_type:'authorization_code'})
+        });
+        const token = await tokenResponse.json().catch(() => ({}));
+        if (!tokenResponse.ok || !token.access_token) return Response.redirect(APP_URL + '?google=token-error', 302);
+        if (!String(token.scope || '').split(/\s+/).includes(GOOGLE_SCOPE)) return Response.redirect(APP_URL + '?google=scope-error', 302);
+        const previous = await env.DB.prepare("SELECT ciphertext, iv FROM google_oauth WHERE id = 'google'").first();
+        const existing = previous ? await decryptCredentials(env, previous) : {};
+        const credentials = {refresh_token:token.refresh_token || existing.refresh_token, scope:token.scope || GOOGLE_SCOPE, connected_at:new Date().toISOString()};
+        if (!credentials.refresh_token) return Response.redirect(APP_URL + '?google=offline-access-error', 302);
+        const encrypted = await encryptCredentials(env, credentials);
+        await env.DB.prepare("INSERT INTO google_oauth (id, ciphertext, iv, updated_at) VALUES ('google', ?, ?, ?) ON CONFLICT(id) DO UPDATE SET ciphertext=excluded.ciphertext, iv=excluded.iv, updated_at=excluded.updated_at")
+          .bind(encrypted.ciphertext, encrypted.iv, new Date().toISOString()).run();
+        return Response.redirect(APP_URL + '?google=connected', 302);
+      } catch (_) {
+        return Response.redirect(APP_URL + '?google=server-error', 302);
+      }
+    }
+
     if (parts[0] === 'mcp') {
       const challenge = { 'WWW-Authenticate': `Bearer resource_metadata="${url.origin}/.well-known/oauth-protected-resource", scope="cc:read"` };
       if (!['AUTH_ISSUER','AUTH_AUDIENCE','AUTH_JWKS_URL'].every(key => env[key])) return json(request, {error:'MCP OAuth is not configured'}, 503);
@@ -224,6 +423,67 @@ export default {
     if (request.headers.get('Authorization') !== `Bearer ${env.API_TOKEN}`) return json(request, { error: 'Unauthorized' }, 401, { 'WWW-Authenticate': 'Bearer' });
     if (parts[0] !== 'v1') return json(request, { error: 'Not found' }, 404);
     try {
+      if (parts[1] === 'google') {
+        if (!['GOOGLE_CLIENT_ID','GOOGLE_CLIENT_SECRET','CREDENTIALS_KEY'].every(key => env[key])) return json(request,{error:'Google Tasks integration is not configured'},503);
+        await ensureGoogleSchema(env.DB);
+        if (parts.length === 3 && parts[2] === 'connect' && request.method === 'POST') {
+          const random = crypto.getRandomValues(new Uint8Array(32));
+          const state = btoa(String.fromCharCode(...random)).replace(/\+/g,'-').replace(/\//g,'_').replace(/=+$/,'');
+          const hash = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(state));
+          const stateHash = btoa(String.fromCharCode(...new Uint8Array(hash)));
+          const expiresAt = Math.floor(Date.now()/1000) + 600;
+          await env.DB.prepare('DELETE FROM google_oauth_states WHERE expires_at < ?').bind(Math.floor(Date.now()/1000)).run();
+          await env.DB.prepare('INSERT INTO google_oauth_states (state_hash, expires_at) VALUES (?, ?)').bind(stateHash, expiresAt).run();
+          const callback = url.origin + '/oauth/google/callback';
+          const auth = new URL('https://accounts.google.com/o/oauth2/v2/auth');
+          auth.search = new URLSearchParams({client_id:env.GOOGLE_CLIENT_ID, redirect_uri:callback, response_type:'code', scope:GOOGLE_SCOPE, access_type:'offline', prompt:'consent', state}).toString();
+          return json(request,{authorizationUrl:auth.toString()});
+        }
+        if (parts.length === 3 && parts[2] === 'status' && request.method === 'GET') {
+          const row = await env.DB.prepare("SELECT updated_at FROM google_oauth WHERE id = 'google'").first();
+          return json(request,{connected:!!row, connectedAt:row?.updated_at || null});
+        }
+        if (parts.length === 3 && parts[2] === 'sync' && request.method === 'POST') {
+          const body = await bodyJson(request);
+          const listId = cleanText(body.listId,300);
+          if (!listId || !Array.isArray(body.tasks) || body.tasks.length > 5000 || !Number.isInteger(body.expectedRevision)) return json(request,{error:'listId, expectedRevision and up to 5,000 tasks are required'},400);
+          const current = await getSnapshot(env.DB);
+          if (current.revision !== body.expectedRevision) return json(request,{error:'Revision conflict',...current},409);
+          const tasks = await syncGoogleTaskList(env.DB,env,listId,body.tasks);
+          const data = {...current.data,tasks};
+          if (!await replaceSnapshot(env.DB,current.revision,data)) return json(request,{error:'Revision conflict',...(await getSnapshot(env.DB))},409);
+          return json(request,{...(await getSnapshot(env.DB)),syncedTasks:tasks.length});
+        }
+        if (parts.length === 3 && parts[2] === 'disconnect' && request.method === 'POST') {
+          await env.DB.prepare("DELETE FROM google_oauth WHERE id = 'google'").run();
+          googleCachedAccessToken = ''; googleAccessTokenExpiresAt = 0;
+          return json(request,{connected:false});
+        }
+        if (parts.length === 3 && parts[2] === 'lists' && request.method === 'GET') {
+          const result = await googleApi(env.DB,env,'/users/@me/lists?maxResults=100');
+          return json(request,{items:(result.items || []).map(item=>({id:item.id,title:item.title,updated:item.updated}))});
+        }
+        if (parts.length === 3 && parts[2] === 'tasks' && request.method === 'GET') {
+          const listId = url.searchParams.get('listId');
+          if (!listId) return json(request,{error:'listId is required'},400);
+          const result = await googleApi(env.DB,env,'/lists/' + encodeURIComponent(listId) + '/tasks?maxResults=100&showCompleted=true&showHidden=true');
+          return json(request,{items:(result.items || []).map(item=>({id:item.id,title:item.title,status:item.status,due:item.due || '',updated:item.updated,notes:item.notes || '',parent:item.parent || ''}))});
+        }
+        if (parts.length === 3 && parts[2] === 'tasks' && request.method === 'POST') {
+          const body = await bodyJson(request);
+          if (!body.listId || !cleanText(body.title,200)) return json(request,{error:'listId and title are required'},400);
+          const task = await googleApi(env.DB,env,'/lists/' + encodeURIComponent(body.listId) + '/tasks',{method:'POST',body:JSON.stringify({title:cleanText(body.title,200),notes:cleanText(body.notes,8000),...(body.due && /^\d{4}-\d{2}-\d{2}$/.test(body.due) ? {due:body.due+'T00:00:00.000Z'} : {})})});
+          return json(request,{item:task},201);
+        }
+        if (parts.length === 5 && parts[2] === 'tasks' && ['PATCH','DELETE'].includes(request.method)) {
+          const listId = decodeURIComponent(parts[3]), taskId = decodeURIComponent(parts[4]);
+          const path = '/lists/' + encodeURIComponent(listId) + '/tasks/' + encodeURIComponent(taskId);
+          if (request.method === 'DELETE') { await googleApi(env.DB,env,path,{method:'DELETE'}); return json(request,{deleted:taskId}); }
+          const body = await bodyJson(request);
+          const updated = await googleApi(env.DB,env,path,{method:'PATCH',body:JSON.stringify({...(body.title !== undefined ? {title:cleanText(body.title,200)} : {}), ...(body.status === 'completed' || body.status === 'needsAction' ? {status:body.status} : {}), ...(body.notes !== undefined ? {notes:cleanText(body.notes,8000)} : {}), ...(body.due !== undefined ? {due:/^\d{4}-\d{2}-\d{2}$/.test(body.due) ? body.due+'T00:00:00.000Z' : null} : {})})});
+          return json(request,{item:updated});
+        }
+      }
       if (parts.length === 2 && parts[1] === 'state' && request.method === 'GET') return json(request, await getSnapshot(env.DB));
 
       if (parts.length === 2 && parts[1] === 'state' && request.method === 'PUT') {
@@ -266,7 +526,7 @@ export default {
       return json(request, { error: 'Not found' }, 404);
     } catch (error) {
       const message = error?.message || 'Request failed';
-      return json(request, { error: message }, /required|must use|Invalid JSON|500 KB/.test(message) ? 400 : 500);
+      return json(request, { error: message }, error?.status || (/required|must use|Invalid JSON|500 KB/.test(message) ? 400 : 500));
     }
   }
 };

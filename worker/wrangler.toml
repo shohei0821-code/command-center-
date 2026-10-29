@@ -7,3 +7,10 @@ keep_vars = true
 binding = "DB"
 database_name = "command-center"
 database_id = "92bb8921-6184-45f5-8a75-7ad964b6d2f2"
+
+[previews]
+
+[[previews.d1_databases]]
+binding = "DB"
+database_name = "command-center-preview"
+database_id = "6512bdce-6d5e-4e28-ad28-4e8f0e09c1c9"

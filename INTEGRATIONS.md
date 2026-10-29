@@ -1,6 +1,6 @@
 # 同期・会話操作のセットアップ
 
-Command Centerは通常、端末内にタスクと予定を保存します。`worker/` にはCloudflare Worker + D1の個人用同期APIと、OAuthで保護したChatGPT MCP接続口を用意しています。APIを一度公開すると、複数端末のPWAとChatGPTから同じタスク・予定を読み書きできます。Google TasksとiCloud Calendarへの直接同期は別機能で、このAPIはそれらへ自動転送しません。
+Command Centerは通常、端末内にタスクと予定を保存します。`worker/` にはCloudflare Worker + D1の個人用同期APIと、OAuthで保護したChatGPT MCP接続口を用意しています。Google Tasks連携はWorker経由で接続し、Command Centerの「連携」画面で明示的に開始すると、選んだGoogleリストとCommand Centerのタスクを双方向同期します。iCloud Calendarへの直接同期は未実装で、ICSの読み込み・書き出しを使います。
 
 このリポジトリはCloudflare Workers Buildsに接続し、`main` ブランチの変更を `/worker` から `npx wrangler deploy` で反映する構成です。`worker/wrangler.toml` には本番D1データベースIDを設定済みです。`API_TOKEN` などの秘密情報はCloudflareのWorker Secretsに保存し、リポジトリには置きません。
 
@@ -41,10 +41,19 @@ ChatGPT MCPプラグインはOAuthでPWA同期用のキーと分離されてい�
 ## 現時点で接続している外部サービス
 
 - **iCloud Calendar**: ChatGPT/Codex側のiCloud Calendarコネクタが利用可能です。Command Center Workerとの直接同期は未実装です。PWAではICSの読み込み・書き出しを使えます。
-- **Google Tasks**: ChatGPT側のTasksBoard接続からタスクリストを確認できます。Command Center Workerとの直接同期は未実装です。ChatGPT側の操作とPWAの同期は別々の接続です。
+- **Google Tasks**: PWAからOAuth接続し、選択したリストと双方向同期できます。Googleの秘密鍵とトークンはCloudflare Worker Secretsおよび暗号化されたD1に保存し、公開JavaScriptには置きません。ChatGPT側のTasksBoard接続は別の接続です。
 - **Command Center API**: MCPプラグインをOAuth接続すれば、会話からCommand Centerのタスク・予定を操作できます。
 
-Google TasksやiCloudへ直接同期する場合は、Google OAuthまたはAppleがサポートするCalDAV認証を別途実装する必要があります。認証情報はWorker Secretsまたは暗号化されたサーバー側ストレージに置き、PWAのHTML/JavaScriptに埋め込みません。
+### Google Tasksの接続手順
+
+1. Google CloudのOAuth同意画面で、利用するGoogleアカウントをテストユーザーに追加します。Google Tasks APIと `https://www.googleapis.com/auth/tasks` のスコープも有効にします。
+2. OAuthクライアントはWebアプリ型にし、承認済みリダイレクトURIを `https://command-center-sync.shohei0821.workers.dev/oauth/google/callback` に設定します。
+3. Worker Secretsに `GOOGLE_CLIENT_SECRET` と `CREDENTIALS_KEY`、通常のWorker変数に `GOOGLE_CLIENT_ID` を設定します。`CREDENTIALS_KEY` は64桁のランダムな16進数です。これらをGitHubや公開HTMLへ書かないでください。
+4. Workerをデプロイし、Command Centerの「設定」でCloudflare Worker URLとAPIキーを保存します。
+5. PWAの「設定」でCloudflare同期を開始し、「連携」から「Google Tasksに接続」を押してGoogleの許可画面を完了します。
+6. 同期するGoogleリストを選び、「双方向同期を開始」を押して内容を確認します。初回同期ではGoogleのタスクをCommand Centerへ取り込み、Command Centerのサンプル以外のタスクをGoogleへ追加します。以降の編集・完了・削除を両側へ反映し、1分ごとに更新を確認します。削除も同期されるため、開始前にタスクのバックアップをおすすめします。
+
+GoogleのOAuth同意画面が「テスト中」のままだと、Tasksのようなユーザーデータのスコープではリフレッシュトークンが7日で期限切れになります。長期利用には公開ステータスやGoogleの検証要件を確認してください ([Google OAuthのトークン期限](https://developers.google.com/identity/protocols/oauth2), [Tasks APIのスコープ](https://developers.google.com/workspace/tasks/auth))。
 
 ## APIセキュリティ
 
