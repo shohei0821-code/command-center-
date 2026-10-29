@@ -288,6 +288,85 @@
     if (!response.ok) { const error = new Error(payload.error || '同期サーバーとの通信に失敗しました'); error.status = response.status; error.payload = payload; throw error; }
     return payload;
   }
+  let googleTaskItems = [];
+  function renderGoogleTasks() {
+    const root = $('#googleTasks'); if (!root) return;
+    root.innerHTML = googleTaskItems.map(task => '<div class="integration-box" data-google-task="' + escapeHtml(task.id) + '"><label style="display:flex;gap:9px;align-items:center;flex:1"><input type="checkbox" class="google-task-done" ' + (task.status === 'completed' ? 'checked' : '') + '><span>' + escapeHtml(task.title) + '</span></label><span class="task-time">' + escapeHtml(task.due ? task.due.slice(0,10) : '') + '</span><button class="link-button google-task-edit" type="button">編集</button><button class="link-button google-task-delete" type="button">削除</button></div>').join('') || '<p class="demo-note">このリストにタスクはありません。</p>';
+  }
+  async function googleRequest(path, options = {}) { return cloudRequest(path, cloudConfig, options); }
+  async function loadGoogleTasks() {
+    const listId = $('#googleTaskList').value;
+    if (!listId) return;
+    $('#googleStatus').textContent = 'Google Tasksを読み込んでいます…';
+    try {
+      const result = await googleRequest('/v1/google/tasks?listId=' + encodeURIComponent(listId));
+      googleTaskItems = result.items || []; renderGoogleTasks();
+      $('#googleStatus').textContent = '接続中 · ' + googleTaskItems.length + '件のタスクを読み込みました';
+    } catch (error) { $('#googleStatus').textContent = error.message; }
+  }
+  async function loadGoogleLists() {
+    const result = await googleRequest('/v1/google/lists');
+    const select = $('#googleTaskList'); const previous = select.value;
+    select.innerHTML = result.items.map(item => '<option value="' + escapeHtml(item.id) + '">' + escapeHtml(item.title) + '</option>').join('');
+    if (result.items.some(item => item.id === previous)) select.value = previous;
+    $('#googleTaskControls').hidden = result.items.length === 0;
+    if (result.items.length) await loadGoogleTasks();
+    else $('#googleStatus').textContent = 'Googleのタスクリストが見つかりません。';
+  }
+  async function refreshGoogleStatus() {
+    if (!cloudConfig?.endpoint || !cloudConfig?.token) { $('#googleStatus').textContent = '先に「設定」でCloudflare同期先を登録してください。'; return; }
+    try {
+      const result = await googleRequest('/v1/google/status');
+      $('#connectGoogle').hidden = result.connected;
+      $('#disconnectGoogle').hidden = !result.connected;
+      $('#googleTaskControls').hidden = !result.connected;
+      $('#googleStatus').textContent = result.connected ? 'Google Tasksに接続済みです。' : '未接続です。Googleアカウントを接続してください。';
+      if (result.connected) await loadGoogleLists();
+    } catch (error) { $('#googleStatus').textContent = error.message; }
+  }
+  $('#connectGoogle').addEventListener('click', async () => {
+    try {
+      const config = configFromForm(); keepCloudConfig(config);
+      const result = await cloudRequest('/v1/google/connect', config, {method:'POST'});
+      location.assign(result.authorizationUrl);
+    } catch (error) { $('#googleStatus').textContent = error.message; }
+  });
+  $('#disconnectGoogle').addEventListener('click', async () => {
+    if (!confirm('Google Tasksとの接続を解除しますか？Google側のタスクは削除されません。')) return;
+    try { await googleRequest('/v1/google/disconnect',{method:'POST'}); googleTaskItems = []; renderGoogleTasks(); await refreshGoogleStatus(); }
+    catch (error) { $('#googleStatus').textContent = error.message; }
+  });
+  $('#refreshGoogleTasks').addEventListener('click', loadGoogleTasks);
+  $('#googleTaskList').addEventListener('change', loadGoogleTasks);
+  $('#googleTaskForm').addEventListener('submit', async event => {
+    event.preventDefault(); const title = $('#googleTaskTitle').value.trim();
+    if (!title || !$('#googleTaskList').value) return;
+    try { await googleRequest('/v1/google/tasks',{method:'POST',body:JSON.stringify({listId:$('#googleTaskList').value,title})}); $('#googleTaskTitle').value = ''; await loadGoogleTasks(); }
+    catch (error) { $('#googleStatus').textContent = error.message; }
+  });
+  $('#googleTasks').addEventListener('change', async event => {
+    if (!event.target.matches('.google-task-done')) return;
+    const row = event.target.closest('[data-google-task]'); const task = googleTaskItems.find(item => item.id === row?.dataset.googleTask);
+    if (!task) return;
+    try { await googleRequest('/v1/google/tasks/' + encodeURIComponent($('#googleTaskList').value) + '/' + encodeURIComponent(task.id),{method:'PATCH',body:JSON.stringify({status:event.target.checked?'completed':'needsAction'})}); await loadGoogleTasks(); }
+    catch (error) { event.target.checked = !event.target.checked; $('#googleStatus').textContent = error.message; }
+  });
+  $('#googleTasks').addEventListener('click', async event => {
+    const row = event.target.closest('[data-google-task]'); const task = googleTaskItems.find(item => item.id === row?.dataset.googleTask);
+    if (!task) return;
+    const path = '/v1/google/tasks/' + encodeURIComponent($('#googleTaskList').value) + '/' + encodeURIComponent(task.id);
+    try {
+      if (event.target.matches('.google-task-delete')) {
+        if (!confirm('Google Tasksから「' + task.title + '」を削除しますか？')) return;
+        await googleRequest(path,{method:'DELETE'});
+      } else if (event.target.matches('.google-task-edit')) {
+        const title = prompt('タスク名を編集',task.title);
+        if (title === null || !title.trim()) return;
+        await googleRequest(path,{method:'PATCH',body:JSON.stringify({title:title.trim()})});
+      } else return;
+      await loadGoogleTasks();
+    } catch (error) { $('#googleStatus').textContent = error.message; }
+  });
   function keepCloudConfig(config) {
     cloudConfig = config; localStorage.setItem(CLOUD_KEY, JSON.stringify(config));
     $('#syncEndpoint').value = config.endpoint || ''; $('#syncToken').value = config.token || '';
@@ -368,6 +447,13 @@
   $('#downloadSync').addEventListener('click', syncDownload);
   window.addEventListener('online', () => { if (cloudAuto && cloudConfig?.dirty) { clearTimeout(cloudTimer); cloudTimer = setTimeout(pushCloud, 100); } });
   if (cloudConfig?.endpoint) { $('#syncEndpoint').value = cloudConfig.endpoint; $('#syncToken').value = cloudConfig.token || ''; }
+  const googleResult = new URLSearchParams(location.search).get('google');
+  if (googleResult) {
+    const messages = {connected:'Google Tasksに接続しました。',cancelled:'Google接続をキャンセルしました。', 'state-error':'Google認証の確認に失敗しました。もう一度接続してください。','server-config-error':'Google連携のサーバー設定を確認してください。','token-error':'Google認証を完了できませんでした。もう一度接続してください。','offline-access-error':'Googleから継続接続の許可を受け取れませんでした。再接続してください。','server-error':'Google連携でエラーが発生しました。'};
+    toast(messages[googleResult] || 'Google連携の結果を確認してください。');
+    history.replaceState(null,'',location.pathname + location.hash);
+  }
+  refreshGoogleStatus();
   async function initializeCloudSync() {
     if (!cloudConfig?.enabled) return;
     showSyncStatus('同期先を確認しています…');

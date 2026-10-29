@@ -1,5 +1,7 @@
 const EMPTY = { tasks: [], events: [], theme: 'dark' };
 const MAX_STATE_BYTES = 500_000;
+const GOOGLE_SCOPE = 'https://www.googleapis.com/auth/tasks';
+const APP_URL = 'https://shohei0821-code.github.io/command-center-/';
 
 function cors(request) {
   const origin = request.headers.get('Origin') || '';
@@ -15,6 +17,65 @@ function cors(request) {
 
 function json(request, body, status = 200, extra = {}) {
   return new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json; charset=utf-8', ...cors(request), ...extra } });
+}
+
+async function ensureGoogleSchema(db) {
+  await db.prepare(`CREATE TABLE IF NOT EXISTS google_oauth (
+    id TEXT PRIMARY KEY CHECK (id = 'google'),
+    ciphertext TEXT NOT NULL,
+    iv TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+  )`).run();
+  await db.prepare(`CREATE TABLE IF NOT EXISTS google_oauth_states (
+    state_hash TEXT PRIMARY KEY,
+    expires_at INTEGER NOT NULL
+  )`).run();
+}
+
+function hexBytes(hex) {
+  if (!/^[a-f0-9]{64}$/i.test(hex || '')) throw new Error('Google credential encryption key is not configured');
+  return Uint8Array.from(hex.match(/.{2}/g), part => parseInt(part, 16));
+}
+
+async function credentialKey(env) {
+  return crypto.subtle.importKey('raw', hexBytes(env.CREDENTIALS_KEY), 'AES-GCM', false, ['encrypt', 'decrypt']);
+}
+
+async function encryptCredentials(env, credentials) {
+  const iv = crypto.getRandomValues(new Uint8Array(12));
+  const data = new TextEncoder().encode(JSON.stringify(credentials));
+  const ciphertext = await crypto.subtle.encrypt({name:'AES-GCM', iv}, await credentialKey(env), data);
+  return {iv:btoa(String.fromCharCode(...iv)), ciphertext:btoa(String.fromCharCode(...new Uint8Array(ciphertext)))};
+}
+
+async function decryptCredentials(env, row) {
+  const ciphertext = Uint8Array.from(atob(row.ciphertext), char => char.charCodeAt(0));
+  const iv = Uint8Array.from(atob(row.iv), char => char.charCodeAt(0));
+  const plain = await crypto.subtle.decrypt({name:'AES-GCM', iv}, await credentialKey(env), ciphertext);
+  return JSON.parse(new TextDecoder().decode(plain));
+}
+
+async function googleAccessToken(db, env) {
+  const row = await db.prepare("SELECT ciphertext, iv FROM google_oauth WHERE id = 'google'").first();
+  if (!row) throw Object.assign(new Error('Google Tasks is not connected'), {status:409});
+  const credentials = await decryptCredentials(env, row);
+  const response = await fetch('https://oauth2.googleapis.com/token', {
+    method:'POST', headers:{'Content-Type':'application/x-www-form-urlencoded'},
+    body:new URLSearchParams({client_id:env.GOOGLE_CLIENT_ID, client_secret:env.GOOGLE_CLIENT_SECRET, refresh_token:credentials.refresh_token, grant_type:'refresh_token'})
+  });
+  const token = await response.json().catch(() => ({}));
+  if (!response.ok || !token.access_token) throw Object.assign(new Error('Google token refresh failed. Reconnect Google Tasks.'), {status:502});
+  return token.access_token;
+}
+
+async function googleApi(db, env, path, options = {}) {
+  const accessToken = await googleAccessToken(db, env);
+  const response = await fetch('https://tasks.googleapis.com/tasks/v1' + path, {
+    ...options, headers:{Authorization:'Bearer ' + accessToken, ...(options.body ? {'Content-Type':'application/json'} : {}), ...(options.headers || {})}
+  });
+  const payload = await response.json().catch(() => ({}));
+  if (!response.ok) throw Object.assign(new Error(payload.error?.message || 'Google Tasks request failed'), {status:response.status});
+  return payload;
 }
 
 function cleanText(value, max = 200) {
@@ -187,6 +248,36 @@ export default {
     }
     if (!env.DB) return json(request, {error:'Database is not configured'}, 503);
 
+    if (url.pathname === '/oauth/google/callback' && request.method === 'GET') {
+      try {
+        await ensureGoogleSchema(env.DB);
+        const state = url.searchParams.get('state') || '';
+        const stateHash = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(state));
+        const encodedHash = btoa(String.fromCharCode(...new Uint8Array(stateHash)));
+        const savedState = await env.DB.prepare('SELECT expires_at FROM google_oauth_states WHERE state_hash = ?').bind(encodedHash).first();
+        await env.DB.prepare('DELETE FROM google_oauth_states WHERE state_hash = ?').bind(encodedHash).run();
+        if (!state || !savedState || savedState.expires_at < Math.floor(Date.now()/1000)) return Response.redirect(APP_URL + '?google=state-error', 302);
+        if (url.searchParams.get('error')) return Response.redirect(APP_URL + '?google=cancelled', 302);
+        if (!env.GOOGLE_CLIENT_ID || !env.GOOGLE_CLIENT_SECRET || !env.CREDENTIALS_KEY) return Response.redirect(APP_URL + '?google=server-config-error', 302);
+        const tokenResponse = await fetch('https://oauth2.googleapis.com/token', {
+          method:'POST', headers:{'Content-Type':'application/x-www-form-urlencoded'},
+          body:new URLSearchParams({code:url.searchParams.get('code') || '', client_id:env.GOOGLE_CLIENT_ID, client_secret:env.GOOGLE_CLIENT_SECRET, redirect_uri:url.origin + '/oauth/google/callback', grant_type:'authorization_code'})
+        });
+        const token = await tokenResponse.json().catch(() => ({}));
+        if (!tokenResponse.ok || !token.access_token) return Response.redirect(APP_URL + '?google=token-error', 302);
+        const previous = await env.DB.prepare("SELECT ciphertext, iv FROM google_oauth WHERE id = 'google'").first();
+        const existing = previous ? await decryptCredentials(env, previous) : {};
+        const credentials = {refresh_token:token.refresh_token || existing.refresh_token, scope:token.scope || GOOGLE_SCOPE, connected_at:new Date().toISOString()};
+        if (!credentials.refresh_token) return Response.redirect(APP_URL + '?google=offline-access-error', 302);
+        const encrypted = await encryptCredentials(env, credentials);
+        await env.DB.prepare("INSERT INTO google_oauth (id, ciphertext, iv, updated_at) VALUES ('google', ?, ?, ?) ON CONFLICT(id) DO UPDATE SET ciphertext=excluded.ciphertext, iv=excluded.iv, updated_at=excluded.updated_at")
+          .bind(encrypted.ciphertext, encrypted.iv, new Date().toISOString()).run();
+        return Response.redirect(APP_URL + '?google=connected', 302);
+      } catch (_) {
+        return Response.redirect(APP_URL + '?google=server-error', 302);
+      }
+    }
+
     if (parts[0] === 'mcp') {
       const challenge = { 'WWW-Authenticate': `Bearer resource_metadata="${url.origin}/.well-known/oauth-protected-resource", scope="cc:read"` };
       if (!['AUTH_ISSUER','AUTH_AUDIENCE','AUTH_JWKS_URL'].every(key => env[key])) return json(request, {error:'MCP OAuth is not configured'}, 503);
@@ -224,6 +315,55 @@ export default {
     if (request.headers.get('Authorization') !== `Bearer ${env.API_TOKEN}`) return json(request, { error: 'Unauthorized' }, 401, { 'WWW-Authenticate': 'Bearer' });
     if (parts[0] !== 'v1') return json(request, { error: 'Not found' }, 404);
     try {
+      if (parts[1] === 'google') {
+        if (!['GOOGLE_CLIENT_ID','GOOGLE_CLIENT_SECRET','CREDENTIALS_KEY'].every(key => env[key])) return json(request,{error:'Google Tasks integration is not configured'},503);
+        await ensureGoogleSchema(env.DB);
+        if (parts.length === 3 && parts[2] === 'connect' && request.method === 'POST') {
+          const random = crypto.getRandomValues(new Uint8Array(32));
+          const state = btoa(String.fromCharCode(...random)).replace(/\+/g,'-').replace(/\//g,'_').replace(/=+$/,'');
+          const hash = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(state));
+          const stateHash = btoa(String.fromCharCode(...new Uint8Array(hash)));
+          const expiresAt = Math.floor(Date.now()/1000) + 600;
+          await env.DB.prepare('DELETE FROM google_oauth_states WHERE expires_at < ?').bind(Math.floor(Date.now()/1000)).run();
+          await env.DB.prepare('INSERT INTO google_oauth_states (state_hash, expires_at) VALUES (?, ?)').bind(stateHash, expiresAt).run();
+          const callback = url.origin + '/oauth/google/callback';
+          const auth = new URL('https://accounts.google.com/o/oauth2/v2/auth');
+          auth.search = new URLSearchParams({client_id:env.GOOGLE_CLIENT_ID, redirect_uri:callback, response_type:'code', scope:GOOGLE_SCOPE, access_type:'offline', prompt:'consent', state}).toString();
+          return json(request,{authorizationUrl:auth.toString()});
+        }
+        if (parts.length === 3 && parts[2] === 'status' && request.method === 'GET') {
+          const row = await env.DB.prepare("SELECT updated_at FROM google_oauth WHERE id = 'google'").first();
+          return json(request,{connected:!!row, connectedAt:row?.updated_at || null});
+        }
+        if (parts.length === 3 && parts[2] === 'disconnect' && request.method === 'POST') {
+          await env.DB.prepare("DELETE FROM google_oauth WHERE id = 'google'").run();
+          return json(request,{connected:false});
+        }
+        if (parts.length === 3 && parts[2] === 'lists' && request.method === 'GET') {
+          const result = await googleApi(env.DB,env,'/users/@me/lists?maxResults=100');
+          return json(request,{items:(result.items || []).map(item=>({id:item.id,title:item.title,updated:item.updated}))});
+        }
+        if (parts.length === 3 && parts[2] === 'tasks' && request.method === 'GET') {
+          const listId = url.searchParams.get('listId');
+          if (!listId) return json(request,{error:'listId is required'},400);
+          const result = await googleApi(env.DB,env,'/lists/' + encodeURIComponent(listId) + '/tasks?maxResults=100&showCompleted=true&showHidden=true');
+          return json(request,{items:(result.items || []).map(item=>({id:item.id,title:item.title,status:item.status,due:item.due || '',updated:item.updated,notes:item.notes || '',parent:item.parent || ''}))});
+        }
+        if (parts.length === 3 && parts[2] === 'tasks' && request.method === 'POST') {
+          const body = await bodyJson(request);
+          if (!body.listId || !cleanText(body.title,200)) return json(request,{error:'listId and title are required'},400);
+          const task = await googleApi(env.DB,env,'/lists/' + encodeURIComponent(body.listId) + '/tasks',{method:'POST',body:JSON.stringify({title:cleanText(body.title,200),notes:cleanText(body.notes,8000),...(body.due && /^\d{4}-\d{2}-\d{2}$/.test(body.due) ? {due:body.due+'T00:00:00.000Z'} : {})})});
+          return json(request,{item:task},201);
+        }
+        if (parts.length === 5 && parts[2] === 'tasks' && ['PATCH','DELETE'].includes(request.method)) {
+          const listId = decodeURIComponent(parts[3]), taskId = decodeURIComponent(parts[4]);
+          const path = '/lists/' + encodeURIComponent(listId) + '/tasks/' + encodeURIComponent(taskId);
+          if (request.method === 'DELETE') { await googleApi(env.DB,env,path,{method:'DELETE'}); return json(request,{deleted:taskId}); }
+          const body = await bodyJson(request);
+          const updated = await googleApi(env.DB,env,path,{method:'PATCH',body:JSON.stringify({...(body.title !== undefined ? {title:cleanText(body.title,200)} : {}), ...(body.status === 'completed' || body.status === 'needsAction' ? {status:body.status} : {}), ...(body.notes !== undefined ? {notes:cleanText(body.notes,8000)} : {}), ...(body.due !== undefined ? {due:/^\d{4}-\d{2}-\d{2}$/.test(body.due) ? body.due+'T00:00:00.000Z' : null} : {})})});
+          return json(request,{item:updated});
+        }
+      }
       if (parts.length === 2 && parts[1] === 'state' && request.method === 'GET') return json(request, await getSnapshot(env.DB));
 
       if (parts.length === 2 && parts[1] === 'state' && request.method === 'PUT') {
