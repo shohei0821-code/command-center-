@@ -1,0 +1,12 @@
+{
+  "name": "COMMAND CENTER",
+  "short_name": "COMMAND",
+  "description": "予定とタスクをまとめるパーソナル・コマンドセンター",
+  "lang": "ja-JP",
+  "start_url": "./index.html",
+  "scope": "./",
+  "display": "standalone",
+  "background_color": "#07111f",
+  "theme_color": "#081321",
+  "icons": [{"src":"icon.svg","sizes":"any","type":"image/svg+xml","purpose":"any maskable"}]
+}
